@@ -65,32 +65,23 @@ public class MovementController {
 
 	/**
 	 * 智能执行一帧的位移计算
-	 * V3.2: 通过 Access Widener 直接设置 LivingEntity 输入字段，然后调用 travel() 让物理引擎处理移动
-	 * 这样移动会通过服务端的物理校验，兼容 Grim/Vulcan 等反作弊插件
-	 * 
-	 * @return true 表示到达目标或判定死路，需要重新分配目标点
+	 * V4: 接入 A* 路径缓存，遇到障碍时绕路而不是放弃
+	 * @return true 表示到达目标或无路可走，需要重新分配目标点
 	 */
-	public static boolean doSmartMove(ServerPlayerEntity p, BlockPos target, double moveStep, 
+	public static boolean doSmartMove(ServerPlayerEntity p, BlockPos target, double moveStep,
 			double noisePhaseYaw, double noisePhasePitch) {
-	// V3.3 安全补丁：防止 target 为空导致 NPE
-	if (target == null) {
-		stopMovement(p);
-		return true; // 返回 true 触发目标重置
-	}
+		if (target == null) { stopMovement(p); return true; }
 
-		com.maohi.fakeplayer.VirtualPlayerManager.Personality pers = com.maohi.fakeplayer.VirtualPlayerManager.Personality.get(p);
-		
-		// ★ P2-2: 驻足看风景逻辑
+		com.maohi.fakeplayer.VirtualPlayerManager.Personality pers =
+			com.maohi.fakeplayer.VirtualPlayerManager.Personality.get(p);
+
+		// 驻足看风景
 		if (pers != null && pers.sightseeingTicks > 0) {
 			pers.sightseeingTicks--;
 			stopMovement(p);
-			// 看风景时缓慢转头观察四周
-			float yawNoise = perlinLike(noisePhaseYaw * 0.8, noiseTime, 1.5f);
-			p.setYaw(p.getYaw() + yawNoise);
-			return false; // 假装还在赶路，不要让管理器重置任务
+			p.setYaw(p.getYaw() + perlinLike(noisePhaseYaw * 0.8, noiseTime, 1.5f));
+			return false;
 		}
-		
-		// 行走中有 0.3% 的极低概率突然停下来看风景 (3~8秒)
 		if (pers != null && ThreadLocalRandom.current().nextInt(300) == 0) {
 			pers.sightseeingTicks = 60 + ThreadLocalRandom.current().nextInt(100);
 			stopMovement(p);
@@ -99,83 +90,87 @@ public class MovementController {
 
 		ServerWorld world = p.getEntityWorld();
 		Vec3d pos = p.getEntityPos();
-		
+
+		// 到达目标
 		double dx = target.getX() + 0.5 - pos.x;
 		double dz = target.getZ() + 0.5 - pos.z;
-		double distSq = dx * dx + dz * dz;
+		if (dx * dx + dz * dz <= 1.5) { stopMovement(p); return true; }
 
-		// 1. 如果已经到了目标点附近，通知管理器任务结束
-		if (distSq <= 1.5) {
-			stopMovement(p);
-			return true; 
+		// ★ A* 路径跟随：如果有缓存路径且目标未变，沿路径走
+		BlockPos nextWaypoint = target;
+		if (pers != null) {
+			// 目标变了就清路径
+			if (!target.equals(pers.pathGoal)) {
+				pers.currentPath.clear();
+				pers.pathGoal = null;
+			}
+			// 路径为空时尝试计算
+			if (pers.currentPath.isEmpty()) {
+				java.util.List<BlockPos> path = PathfindingNavigation.findPath(world, p.getBlockPos(), target);
+				if (!path.isEmpty()) {
+					pers.currentPath.addAll(path);
+					pers.pathGoal = target;
+				}
+			}
+			// 消费已到达的路径点
+			while (!pers.currentPath.isEmpty()) {
+				BlockPos wp = pers.currentPath.peek();
+				double wdx = wp.getX() + 0.5 - pos.x;
+				double wdz = wp.getZ() + 0.5 - pos.z;
+				if (wdx * wdx + wdz * wdz <= 2.25) pers.currentPath.poll();
+				else break;
+			}
+			if (!pers.currentPath.isEmpty()) nextWaypoint = pers.currentPath.peek();
 		}
 
-		double dist = Math.sqrt(distSq);
-		boolean isSprinting = dist > 4.0;
+		// 朝向下一个路径点
+		double ndx = nextWaypoint.getX() + 0.5 - pos.x;
+		double ndz = nextWaypoint.getZ() + 0.5 - pos.z;
+		double ndist = Math.sqrt(ndx * ndx + ndz * ndz);
+		if (ndist < 0.01) ndist = 0.01;
 
-		// 2. 视线平滑追踪 + Perlin 噪声漂浮
-		float targetYaw = (float) (MathHelper.atan2(dz, dx) * (180F / Math.PI)) - 90.0F;
-		float lerpedYaw = MathHelper.lerpAngleDegrees(0.2f, p.getYaw(), targetYaw);
+		float targetYaw = (float) (MathHelper.atan2(ndz, ndx) * (180F / Math.PI)) - 90.0F;
+		p.setYaw(MathHelper.lerpAngleDegrees(0.2f, p.getYaw(), targetYaw)
+			+ perlinLike(noisePhaseYaw, noiseTime, 1.5f));
+		p.setPitch(MathHelper.clamp(p.getPitch() + perlinLike(noisePhasePitch, noiseTime, 2.0f), -90f, 90f));
 
-		float yawNoise = perlinLike(noisePhaseYaw, noiseTime, 1.5f);
-		p.setYaw(lerpedYaw + yawNoise);
+		// 前方碰撞检测
+		double nx = pos.x + ndx / ndist;
+		double nz = pos.z + ndz / ndist;
+		BlockPos nextPos = BlockPos.ofFloored(nx, pos.y, nz);
 
-		float basePitch = p.getPitch();
-		float pitchNoise = perlinLike(noisePhasePitch, noiseTime, 2.0f);
-		p.setPitch(MathHelper.clamp(basePitch + pitchNoise, -90.0f, 90.0f));
-
-		// 3. 预判下一步坐标
-		double nextX = pos.x + (dx / dist * 1.0);
-		double nextZ = pos.z + (dz / dist * 1.0);
-		BlockPos nextPos = BlockPos.ofFloored(nextX, pos.y, nextZ);
-
-		// 4. 路径规避：如果前方是岩浆或悬崖，坚决不走
 		if (PathfindingNavigation.isDangerAhead(world, nextPos)) {
 			stopMovement(p);
+			if (pers != null) pers.currentPath.clear();
 			return true;
 		}
 
-		// 5. 物理碰撞雷达
-		boolean isBlocked = !world.getBlockState(nextPos).getCollisionShape(world, nextPos).isEmpty() 
+		boolean isBlocked = !world.getBlockState(nextPos).getCollisionShape(world, nextPos).isEmpty()
 			|| !world.getBlockState(nextPos.up()).getCollisionShape(world, nextPos.up()).isEmpty();
 
 		if (isBlocked) {
-			boolean canJumpOver = world.getBlockState(nextPos.up(1)).getCollisionShape(world, nextPos.up(1)).isEmpty()
+			boolean canJump = world.getBlockState(nextPos.up(1)).getCollisionShape(world, nextPos.up(1)).isEmpty()
 				&& world.getBlockState(nextPos.up(2)).getCollisionShape(world, nextPos.up(2)).isEmpty()
 				&& world.getBlockState(p.getBlockPos().up(2)).getCollisionShape(world, p.getBlockPos().up(2)).isEmpty();
-
-			if (canJumpOver) {
-				// 跳跃跑酷：设置前进输入 + 跳跃
+			if (canJump) {
 				if (p.isOnGround()) {
-					p.setSprinting(isSprinting);
+					p.setSprinting(ndist > 4.0);
 					setMovement(p, 1.0f, 0.0f);
 					p.jump();
-					// V3.2: 跳跃加速仍需 addVelocity（这是 MC 的标准做法，原版的跳跃冲刺也这样）
-					p.addVelocity(dx / dist * 0.1, 0, dz / dist * 0.1);
+					p.addVelocity(ndx / ndist * 0.1, 0, ndz / ndist * 0.1);
 				}
 			} else {
-				// 死路
+				// 无法跳越：清路径，下次重新计算
+				if (pers != null) pers.currentPath.clear();
 				stopMovement(p);
-				return true; 
+				return false; // 不放弃任务，等下次 tick 重算路径
 			}
 		} else {
-			// 道路畅通：通过输入字段控制移动（反作弊兼容）
-			p.setSprinting(isSprinting);
-			// 前进速度 0.8~1.0（模拟真人的行走/奔跑输入）
-			float fwd = 0.8f + ThreadLocalRandom.current().nextFloat() * 0.2f;
-			
-			// ★ P0: 移动轨迹曲线化 (S形摇摆)
-			// 利用假人独立的 noisePhaseYaw（每个假人都不同）生成平滑的侧向输入
-			// 振幅设为 0.5f，意味着产生最大 50% 的侧滑速度，形成自然宽阔的曲线
+			p.setSprinting(ndist > 4.0);
 			float lateralDrift = perlinLike(noisePhaseYaw * 1.2, noiseTime, 0.5f);
-			
-			// 6. 失误模拟：偶尔的脚步错乱（修复原版未生效的 Bug）
-			if (ThreadLocalRandom.current().nextInt(150) == 0) {
+			if (ThreadLocalRandom.current().nextInt(150) == 0)
 				lateralDrift += ThreadLocalRandom.current().nextFloat() * 0.8f - 0.4f;
-			}
-			
-			setMovement(p, fwd, lateralDrift);
-			// 调用 travel() 让物理引擎处理位移（通过服务端校验）
+			setMovement(p, 0.8f + ThreadLocalRandom.current().nextFloat() * 0.2f, lateralDrift);
 			p.travel(new Vec3d(p.sidewaysSpeed, 0, p.forwardSpeed));
 		}
 

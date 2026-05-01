@@ -139,6 +139,55 @@ public class SurvivalMechanics {
 		}
 	}
 
+	/** 自动装备背包中防御值更高的护甲 */
+	public static void autoEquipArmor(ServerPlayerEntity player) {
+		PlayerInventory inv = player.getInventory();
+		// 护甲槽：36=靴子, 37=护腿, 38=胸甲, 39=头盔
+		int[] armorSlots = {36, 37, 38, 39};
+		for (int armorSlot : armorSlots) {
+			ItemStack equipped = inv.getStack(armorSlot);
+			int equippedDef = getArmorDefense(equipped);
+			for (int i = 0; i < 36; i++) {
+				if (i >= 36) continue;
+				ItemStack candidate = inv.getStack(i);
+				if (candidate.isEmpty()) continue;
+				if (!isArmorForSlot(candidate, armorSlot)) continue;
+				if (getArmorDefense(candidate) > equippedDef) {
+					// 交换：把候选装备放到护甲槽，原装备放回背包
+					inv.setStack(armorSlot, candidate.copy());
+					inv.setStack(i, equipped.copy());
+					equipped = inv.getStack(armorSlot);
+					equippedDef = getArmorDefense(equipped);
+				}
+			}
+		}
+	}
+
+	private static int getArmorDefense(ItemStack stack) {
+		if (stack.isEmpty()) return 0;
+		var def = stack.getComponents().get(net.minecraft.component.DataComponentTypes.ATTRIBUTE_MODIFIERS);
+		if (def == null) return 0;
+		int total = 0;
+		for (var entry : def.modifiers()) {
+			if (entry.attribute().value() == net.minecraft.entity.attribute.EntityAttributes.ARMOR) {
+				total += (int) entry.modifier().value();
+			}
+		}
+		return total;
+	}
+
+	private static boolean isArmorForSlot(ItemStack stack, int armorSlot) {
+		if (stack.isEmpty()) return false;
+		String id = net.minecraft.registry.Registries.ITEM.getId(stack.getItem()).getPath();
+		return switch (armorSlot) {
+			case 36 -> id.endsWith("_boots");
+			case 37 -> id.endsWith("_leggings");
+			case 38 -> id.endsWith("_chestplate");
+			case 39 -> id.endsWith("_helmet");
+			default -> false;
+		};
+	}
+
 	/** 在快捷栏中寻找可食用的物品 */
 	private static int findFoodSlot(PlayerInventory inv) {
 		for (int i = 0; i < 9; i++) {

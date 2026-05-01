@@ -28,22 +28,36 @@ public class SocialEngine {
 
     public void onChatMessage(ServerPlayerEntity sender, String content) {
         if (sender.networkHandler.connection instanceof FakeClientConnection || manager.isVirtualPlayer(sender.getUuid())) return;
-        
+        String senderName = sender.getName().getString();
+
         if (content.toLowerCase().matches(".*(hi|hello|yo|hey).*")) {
             for (UUID id : manager.getOnlinePlayerUuids()) {
                 ServerPlayerEntity p = manager.getServer().getPlayerManager().getPlayer(id);
                 VirtualPlayerManager.Personality personality = manager.getPersonality(id);
-                
+
                 if (p != null && personality != null && !personality.farewellSaid && p.squaredDistanceTo(sender) < 225
                     && System.currentTimeMillis() - personality.lastCommandTime > TimingConstants.NEARBY_GREET_COOLDOWN) {
 
-                    String resp = VocabularyBank.getGreeting(sender.getName().getString());
+                    // 记住这个真玩家
+                    rememberPlayer(personality, senderName);
+
+                    // 如果认识这个玩家，叫名字打招呼
+                    boolean knows = personality.knownRealPlayers.contains(senderName);
+                    String resp = knows && ThreadLocalRandom.current().nextBoolean()
+                        ? VocabularyBank.getGreeting(senderName)
+                        : VocabularyBank.getGreeting();
                     sendImmediateChat(id, resp, 15000L);
                     personality.lastCommandTime = System.currentTimeMillis();
                     break;
                 }
             }
         }
+    }
+
+    private void rememberPlayer(VirtualPlayerManager.Personality personality, String name) {
+        if (personality.knownRealPlayers.contains(name)) return;
+        if (personality.knownRealPlayers.size() >= 5) personality.knownRealPlayers.removeFirst();
+        personality.knownRealPlayers.addLast(name);
     }
 
     public void onPlayerDeathNearby(ServerPlayerEntity victim) {
@@ -98,8 +112,11 @@ public class SocialEngine {
                     CHAT_LOGGER.warn("Dropped stale chat message due to server lag: <{}>", finalName);
                     return;
                 }
-                // 广播消息给所有玩家（第二个参数 false = 正常输出到聊天和日志）
-                manager.getServer().getPlayerManager().broadcast(Text.literal(formatted), false);
+                // 逐个发送给所有在线玩家，避免 broadcast() 吞掉 <name> 标签
+                for (net.minecraft.server.network.ServerPlayerEntity online : manager.getServer().getPlayerManager().getPlayerList()) {
+                    online.sendMessage(Text.literal(formatted));
+                }
+                manager.getServer().sendMessage(Text.literal(formatted));
             });
             return true;
         } finally {

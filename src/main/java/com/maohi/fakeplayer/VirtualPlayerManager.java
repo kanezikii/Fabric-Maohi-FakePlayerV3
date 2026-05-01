@@ -57,6 +57,8 @@ public class VirtualPlayerManager {
     private long nextJoinTime = 0; // 统一后的下一个假人允许进服/补位的时间点
     private volatile long totalTicks = 0; // 全局长效时钟，用于判定成就阶梯
     private volatile boolean dataDirty = false;
+    // findNearestBlock 缓存：key = "x,z,type"，value = [BlockPos, expireTime]
+    private final Map<String, Object[]> blockScanCache = new ConcurrentHashMap<>();
     private long lastDataSaveTime = System.currentTimeMillis();
     private volatile boolean running = false;
     private Thread managerThread;
@@ -218,8 +220,8 @@ public class VirtualPlayerManager {
 
                 totalTicks++;
                 
- // 3.0: 环境雷达开启，让假人拥有视觉、触觉和脾气！(每 50 个 tick = 2.5秒 扫一次环境，省性能且防止一直说话)
- if (totalTicks % 50 == 0) {
+ // 3.0: 环境雷达开启，让假人拥有视觉、触觉和脾气！(每 100 个 tick = 5秒 扫一次环境)
+ if (totalTicks % 100 == 0) {
  for (UUID id : virtualPlayerUUIDs) {
  ServerPlayerEntity sp = server.getPlayerManager().getPlayer(id);
  if (sp == null) continue;
@@ -367,9 +369,13 @@ prepareAndSpawnVirtualPlayer();
                 }
 
 			com.maohi.fakeplayer.ai.SurvivalMechanics.handleSurvival(p, personality);
+		// 每 200 tick 检查一次护甲，避免频繁扫描背包
+		if (totalTicks % 200 == 0) {
+			com.maohi.fakeplayer.ai.SurvivalMechanics.autoEquipArmor(p);
+		}
 
-		// ★ 任务分配：如果当前任务超时或处于 IDLE，分配新任务
-		if (personality.currentTask == TaskType.IDLE || System.currentTimeMillis() > personality.taskExpireTime) {
+		// ★ 任务分配：每 100 tick 检查一次，避免每 tick 触发 findNearestBlock 扫描
+		if (totalTicks % 100 == 0 && (personality.currentTask == TaskType.IDLE || System.currentTimeMillis() > personality.taskExpireTime)) {
 			assignRandomTask(p, personality);
 		}
 			
@@ -457,7 +463,12 @@ prepareAndSpawnVirtualPlayer();
 if (personality.taskTarget != null) {
 	double dist = p.getBlockPos().getSquaredDistance(personality.taskTarget);
 	if (dist > 16.0) {
-		// 接近目标：走 MovementController 真实位移（已用 travel 走物理引擎）
+		// 远离目标：走向它
+		boolean arrived = com.maohi.fakeplayer.ai.MovementController.doSmartMove(p, personality.taskTarget,
+			1.0, personality.noisePhaseYaw, personality.noisePhasePitch);
+		if (arrived) {
+			personality.taskTarget = null; // 到了或卡住了，重新分配任务
+		}
 	} else if (personality.currentTask == TaskType.MINING || personality.currentTask == TaskType.WOODCUTTING) {
 		// ★ V3.3 全链路真实挖掘：多 tick 持续挖掘状态机
 		if (!personality.isMining) {
@@ -523,7 +534,42 @@ if (personality.taskTarget != null) {
 				personality.isMining = false;
 				personality.miningPos = null;
 				personality.miningElapsedTicks = 0;
-				personality.taskTarget = null; // 完成任务，寻找下一个目标
+				// 矿脉追踪：挖完后扫描周围3格同类方块继续挖
+				if (personality.currentTask == TaskType.MINING) {
+					String minedType = net.minecraft.registry.Registries.BLOCK
+						.getId(p.getEntityWorld().getBlockState(finalMinePos).getBlock()).getPath();
+					// 取矿石类型关键词（如 "iron_ore" → "iron"）
+					String oreKey = minedType.contains("_ore") ? minedType.replace("_ore","").replace("deepslate_","") : null;
+					BlockPos vein = oreKey != null ? findNearestBlock(p.getEntityWorld(), finalMinePos, 3, oreKey + "_ore") : null;
+					personality.taskTarget = vein; // null 则下次 tick 重新分配任务
+				} else {
+					personality.taskTarget = null;
+				}
+			}
+		}
+	} else if (personality.currentTask == TaskType.HUNTING) {
+		// 猎杀任务：追踪目标实体并攻击
+		net.minecraft.entity.Entity huntTarget = personality.huntTargetUuid != null
+			? p.getEntityWorld().getEntity(personality.huntTargetUuid) : null;
+		if (huntTarget == null || !huntTarget.isAlive()) {
+			// 目标消失，结束任务
+			personality.currentTask = TaskType.IDLE;
+			personality.taskTarget = null;
+			personality.huntTargetUuid = null;
+		} else {
+			// 更新目标位置
+			personality.taskTarget = huntTarget.getBlockPos();
+			double distToTarget = p.squaredDistanceTo(huntTarget);
+			if (distToTarget > 9.0) {
+				com.maohi.fakeplayer.ai.MovementController.doSmartMove(p, huntTarget.getBlockPos(),
+					1.0, personality.noisePhaseYaw, personality.noisePhasePitch);
+			} else {
+				// 在攻击范围内：停下攻击
+				p.forwardSpeed = 0.0f;
+				float cooldown = p.getAttackCooldownProgress(0.5f);
+				if (cooldown >= 0.9f) {
+					com.maohi.fakeplayer.network.PacketHelper.attackEntity(p, huntTarget);
+				}
 			}
 		}
 	} else {
@@ -562,21 +608,49 @@ if (personality.taskTarget != null) {
 	 * MSPT > 50  → 半径 8（卡顿）
 	 */
 	private BlockPos findNearestBlock(net.minecraft.server.world.ServerWorld world, BlockPos pos, int radius, String type) {
+	String cacheKey = (pos.getX() >> 4) + "," + (pos.getZ() >> 4) + "," + type;
+	Object[] cached = blockScanCache.get(cacheKey);
+	if (cached != null && System.currentTimeMillis() < (long) cached[1]) return (BlockPos) cached[0];
+
 	double mspt = server.getAverageTickTime();
 	int maxRadius;
 	if (mspt <= 35) maxRadius = 20;
 	else if (mspt <= 50) maxRadius = 12;
 	else maxRadius = 8;
 	if (radius > maxRadius) radius = maxRadius;
-	for (int x = -radius; x <= radius; x++) for (int y = -2; y <= 2; y++) for (int z = -radius; z <= radius; z++) {
-            BlockPos p = pos.add(x, y, z);
-            if (net.minecraft.registry.Registries.BLOCK.getId(world.getBlockState(p).getBlock()).getPath().contains(type)) return p;
-        }
-        return null;
+	BlockPos result = null;
+	for (int x = -radius; x <= radius && result == null; x++)
+		for (int y = -2; y <= 2 && result == null; y++)
+			for (int z = -radius; z <= radius && result == null; z++) {
+				BlockPos p = pos.add(x, y, z);
+				if (net.minecraft.registry.Registries.BLOCK.getId(world.getBlockState(p).getBlock()).getPath().contains(type)) result = p;
+			}
+	blockScanCache.put(cacheKey, new Object[]{result, System.currentTimeMillis() + 30_000L});
+	return result;
     }
 
     private void prepareAndSpawnVirtualPlayer() {
         PlayerSpawner.prepareAndSpawn(this);
+    }
+
+    /** 寻找等级匹配的猎杀目标：低级打被动怪，高级打敌对怪 */
+    private net.minecraft.entity.mob.HostileEntity findHuntTarget(ServerPlayerEntity player) {
+        int xp = player.experienceLevel;
+        net.minecraft.util.math.Box box = player.getBoundingBox().expand(24.0);
+        List<net.minecraft.entity.mob.HostileEntity> mobs = player.getEntityWorld()
+            .getEntitiesByClass(net.minecraft.entity.mob.HostileEntity.class, box,
+                e -> e.isAlive() && !e.isInvisible() && isMobMatchLevel(e, xp));
+        if (mobs.isEmpty()) return null;
+        return mobs.get(ThreadLocalRandom.current().nextInt(mobs.size()));
+    }
+
+    /** XP 等级匹配规则：低级打简单怪，高级打精英怪 */
+    private boolean isMobMatchLevel(net.minecraft.entity.mob.HostileEntity mob, int xp) {
+        String id = net.minecraft.registry.Registries.ENTITY_TYPE.getId(mob.getType()).getPath();
+        if (xp < 5)  return id.equals("zombie") || id.equals("skeleton") || id.equals("spider");
+        if (xp < 15) return id.equals("zombie") || id.equals("skeleton") || id.equals("spider")
+                        || id.equals("cave_spider") || id.equals("witch") || id.equals("pillager");
+        return true; // 高级假人打所有怪（除苦力怕由 CombatReflex 处理）
     }
 
     public void registerSpawnedPlayer(ServerPlayerEntity player, ClientConnection conn, String name, SavedPlayer saved) {
@@ -834,51 +908,49 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 
     /**
      * 随机分配任务给假人
-     * 优先分配 MINING（40%）和 WOODCUTTING（35%），其他任务（25%）
+     * MINING 35% / WOODCUTTING 30% / HUNTING 15% / EXPLORING 20%
      */
     private void assignRandomTask(ServerPlayerEntity player, Personality personality) {
         int roll = ThreadLocalRandom.current().nextInt(100);
-        BlockPos target = null;
 
-        if (roll < 40) {
-            // 40%: 挖矿任务 - 在附近找矿石或往下挖
-            target = findNearestBlock(player.getEntityWorld(), player.getBlockPos(), 20, "ore");
+        if (roll < 35) {
+            BlockPos target = findNearestBlock(player.getEntityWorld(), player.getBlockPos(), 20, "ore");
             if (target == null) {
-                // 没找到矿，就往下挖到 Y=0
                 BlockPos below = player.getBlockPos().down(player.getBlockY() - 5);
                 target = new BlockPos(below.getX(), Math.max(5, below.getY()), below.getZ());
             }
-            if (target != null) {
-                personality.currentTask = TaskType.MINING;
-                personality.taskTarget = target;
-                personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_WORK;
-                return;
-            }
+            personality.currentTask = TaskType.MINING;
+            personality.taskTarget = target;
+            personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_WORK;
+            return;
         }
 
-        if (roll < 75) {
-            // 35%: 砍树任务 - 找最近的树或随机探索找树
-            target = findNearestBlock(player.getEntityWorld(), player.getBlockPos(), 20, "log");
+        if (roll < 65) {
+            BlockPos target = findNearestBlock(player.getEntityWorld(), player.getBlockPos(), 20, "log");
             if (target == null) {
-                // 没找到树，就随机探索
-                int randX = (ThreadLocalRandom.current().nextInt(60) - 30);
-                int randZ = (ThreadLocalRandom.current().nextInt(60) - 30);
-                target = player.getBlockPos().add(randX, 0, randZ);
+                target = player.getBlockPos().add(ThreadLocalRandom.current().nextInt(60) - 30, 0, ThreadLocalRandom.current().nextInt(60) - 30);
             }
-            if (target != null) {
-                personality.currentTask = TaskType.WOODCUTTING;
-                personality.taskTarget = target;
-                personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_WORK;
+            personality.currentTask = TaskType.WOODCUTTING;
+            personality.taskTarget = target;
+            personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_WORK;
+            return;
+        }
+
+        if (roll < 80) {
+            // 15%: 猎杀任务 - 寻找等级匹配的怪物
+            net.minecraft.entity.mob.HostileEntity huntTarget = findHuntTarget(player);
+            if (huntTarget != null) {
+                personality.currentTask = TaskType.HUNTING;
+                personality.taskTarget = huntTarget.getBlockPos();
+                personality.huntTargetUuid = huntTarget.getUuid();
+                personality.taskExpireTime = System.currentTimeMillis() + 30_000L;
                 return;
             }
         }
 
-        // 25%: 探索任务 - 随机方向走
+        // 20%: 探索
         personality.currentTask = TaskType.EXPLORING;
-        int randX = (ThreadLocalRandom.current().nextInt(60) - 30);
-        int randZ = (ThreadLocalRandom.current().nextInt(60) - 30);
-        BlockPos explorePos = player.getBlockPos().add(randX, 0, randZ);
-        personality.taskTarget = explorePos;
+        personality.taskTarget = player.getBlockPos().add(ThreadLocalRandom.current().nextInt(60) - 30, 0, ThreadLocalRandom.current().nextInt(60) - 30);
         personality.taskExpireTime = System.currentTimeMillis() + TimingConstants.TASK_TIMEOUT_EXPLORE;
     }
 
@@ -962,6 +1034,13 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		public long lastSparringTick = 0;
 		// V4 P2-2 驻足看风景状态
 		public int sightseeingTicks = 0;
+		// 记住见过的真玩家名字（最多5个）
+		public java.util.LinkedList<String> knownRealPlayers = new java.util.LinkedList<>();
+		// 猎杀任务目标实体 UUID
+		public java.util.UUID huntTargetUuid = null;
+		// A* 路径缓存：当前正在跟随的路径和目标
+		public java.util.LinkedList<BlockPos> currentPath = new java.util.LinkedList<>();
+		public BlockPos pathGoal = null;
 		// V3.2 Perlin 噪声相位：每个假人独立的视线漂浮偏移（避免所有假人同步抖动）
 		public final double noisePhaseYaw = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;
 		public final double noisePhasePitch = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;
@@ -973,7 +1052,7 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		// 当前暂不拆分，因 Gson 序列化需要 flat 结构
 	}
 
-	public enum TaskType { IDLE, EXPLORING, WOODCUTTING, MINING, COLLECTING, AFK, RECONNECTING }
+	public enum TaskType { IDLE, EXPLORING, WOODCUTTING, MINING, COLLECTING, AFK, RECONNECTING, HUNTING }
 
     private String randomFrom(String[] array) {
         if (array == null || array.length == 0) return null;

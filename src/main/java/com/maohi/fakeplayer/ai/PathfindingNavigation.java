@@ -143,10 +143,12 @@ public class PathfindingNavigation {
 		return Collections.emptyList();
 	}
 
-	/** 4 方向邻居（XZ 平面，保持 Y） */
+	/** 5 方向邻居：4 个水平方向 + 上一格（跳跃）+ 下一格（下台阶） */
 	private static BlockPos[] getNeighbors(BlockPos pos) {
 		return new BlockPos[] {
-			pos.north(), pos.south(), pos.east(), pos.west()
+			pos.north(), pos.south(), pos.east(), pos.west(),
+			pos.north().up(), pos.south().up(), pos.east().up(), pos.west().up(),
+			pos.north().down(), pos.south().down(), pos.east().down(), pos.west().down()
 		};
 	}
 

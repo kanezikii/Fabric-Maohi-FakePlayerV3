@@ -5,7 +5,8 @@
       "Bash(cd e:\\\\\\\\Geminicli\\\\\\\\Fabric-Maohi-FakePlayerV3)",
       "Bash(./gradlew clean *)",
       "Bash(sed -i '448d' \"e:/Geminicli/Fabric-Maohi-FakePlayerV3/src/main/java/com/maohi/fakeplayer/VirtualPlayerManager.java\")",
-      "Bash(sed -i \"448s/playtime/onlineMs/\" \"e:/Geminicli/Fabric-Maohi-FakePlayerV3/src/main/java/com/maohi/fakeplayer/VirtualPlayerManager.java\")"
+      "Bash(sed -i \"448s/playtime/onlineMs/\" \"e:/Geminicli/Fabric-Maohi-FakePlayerV3/src/main/java/com/maohi/fakeplayer/VirtualPlayerManager.java\")",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
