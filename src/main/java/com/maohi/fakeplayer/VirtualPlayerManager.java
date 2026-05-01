@@ -345,6 +345,13 @@ prepareAndSpawnVirtualPlayer();
 
                 ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
                 if (p == null) return;
+                
+                String name = virtualPlayerNames.get(uuid);
+                if (name == null || name.isEmpty()) {
+                    name = "[ERR_" + uuid.toString().substring(0, 4) + "]";
+                    org.slf4j.LoggerFactory.getLogger("Maohi-Debug").error("Critical: Name missing for UUID: " + uuid);
+                }
+                
                 Personality personality = playerPersonalities.get(uuid);
                 if (personality == null) return;
 
@@ -568,6 +575,11 @@ if (personality.taskTarget != null) {
     }
 
     public void registerSpawnedPlayer(ServerPlayerEntity player, ClientConnection conn, String name, SavedPlayer saved) {
+        // 名字非空校验
+        if (name == null || name.isEmpty()) {
+            name = "Player_" + player.getUuid().toString().substring(0, 4);
+        }
+
         virtualPlayerUUIDs.add(player.getUuid());
         virtualPlayerNames.put(player.getUuid(), name);
         // 恢复记忆：如果是老玩家回归，加载其保存的个性与成就记录
