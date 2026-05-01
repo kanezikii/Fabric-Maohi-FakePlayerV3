@@ -140,10 +140,20 @@ public class VocabularyBank {
 	public static String getCombatWin() { return addEmotion(getRandom(COMBAT_WIN)); }
 	public static String getCombatLose() { return addEmotion(getRandom(COMBAT_LOSE)); }
 	public static String getGreeting() { return addEmotion(getRandom(GREETING)); }
+	public static String getGreeting(String targetName) { 
+		String msg = getRandom(GREETING);
+		if (ThreadLocalRandom.current().nextBoolean()) return addEmotion(msg + " " + targetName);
+		return addEmotion(msg);
+	}
 	public static String getFarewell() { return addEmotion(getRandom(FAREWELL)); }
 	public static String getAFKMessage() { return addEmotion(getRandom(AFK_MESSAGES)); }
 	public static String getBackMessage() { return addEmotion(getRandom(BACK_MESSAGES)); }
 	public static String getDeathReaction() { return addEmotion(getRandom(DEATH_REACT)); }
+	public static String getDeathReaction(String targetName) {
+		String msg = getRandom(DEATH_REACT);
+		if (ThreadLocalRandom.current().nextBoolean()) return addEmotion(msg + " " + targetName);
+		return addEmotion(msg);
+	}
 	public static String getIdleChat() { return addEmotion(getRandom(IDLE_CHAT)); }
 	public static String getFoundGood() { return addEmotion(getRandom(FOUND_GOOD)); }
 
