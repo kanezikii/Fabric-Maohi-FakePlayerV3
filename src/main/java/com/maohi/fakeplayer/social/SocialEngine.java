@@ -66,9 +66,22 @@ public class SocialEngine {
 			String reaction = generateRealisticMessage("DEATH", victim.getName().getString(), id);
                     scheduleDelayedResponse(new String[]{reaction}, 2, 5, id);
                     personality.lastCommandTime = System.currentTimeMillis();
-                    break;
                 }
             }
+        }
+    }
+
+    /**
+     * 当假人自己死亡时触发 (发牢骚逻辑)
+     */
+    public void onVictimDeath(UUID victim) {
+        if (manager.isLoggingOut(victim)) return;
+        
+        // 死亡后发牢骚概率 (70%)
+        if (java.util.concurrent.ThreadLocalRandom.current().nextInt(100) < 70) {
+            String complaint = VocabularyBank.getCombatLose();
+            // 延迟 3-6 秒，正好是点击复活后回到出生点说话的时间
+            scheduleDelayedResponse(new String[]{complaint}, 3, 6, victim);
         }
     }
 

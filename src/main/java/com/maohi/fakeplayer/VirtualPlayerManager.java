@@ -98,6 +98,10 @@ public class VirtualPlayerManager {
 
     public void onVirtualPlayerDeath(UUID uuid) {
         if (!virtualPlayerUUIDs.contains(uuid)) return;
+        
+        // 2.80 拟真补丁：死亡触发发牢骚逻辑
+        socialEngine.onVictimDeath(uuid);
+
         long delay = (config().respawnDelayMinSec + ThreadLocalRandom.current().nextInt(config().respawnDelayMaxSec - config().respawnDelayMinSec + 1)) * 1000L;
         deathTimestamps.put(uuid, System.currentTimeMillis() + delay);
         pendingRespawn.add(uuid);
