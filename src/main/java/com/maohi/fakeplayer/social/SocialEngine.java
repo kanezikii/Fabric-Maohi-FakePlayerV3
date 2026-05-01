@@ -129,8 +129,8 @@ public class SocialEngine {
                                 false
                             );
                             
-                            // 使用显眼的日志标签，确保能追踪来源
-                            org.slf4j.LoggerFactory.getLogger("Maohi-Social").info(formatted);
+                            // V3.9: 彻底潜行——使用原版 Server thread 日志名，抹除所有插件痕迹
+                            org.slf4j.LoggerFactory.getLogger("Server thread").info(formatted);
                         } catch (Exception ignored) {}
                     });
 
