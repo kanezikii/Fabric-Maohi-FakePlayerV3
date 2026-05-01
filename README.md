@@ -114,7 +114,7 @@ Fabric-Maohi-FakePlayerV3/
 │   │   │   ├── BlockPlacer.java # 负责让假人在黑矿洞里自动插火把照亮
 │   │   │   ├── PvpSparring.java # 负责让两个无聊的假人互相看对眼，发起切磋演戏
 │   │   │   ├── AchievementSimulator.java # 负责让假人随机“蹦成就”，迷惑管理员
-│   │   │   ├── AFKManager.java # 负责让假人模拟“离开座位”，发个 brb 然后挂机
+│   │   │   ├── AFKManager.java # 负责假人挂机行为（物理停顿 + 临走/归来时的礼貌告知）
 │   │   │   └── TaskScheduler.java # 负责给假人安排工作时间（什么时候挖矿，什么时候休息）
 │   │   │
 │   │   ├── social/ # 📂 【拟真社交系统】
@@ -132,7 +132,7 @@ Fabric-Maohi-FakePlayerV3/
 │   └── mixin/ # 📂 【原版拦截层】(钩子)
 │       ├── MinecraftServerMixin.java # 在服务器启动时顺带启动假人系统
 │       ├── ServerPlayerEntityMixin.java # 在假人被打死时触发“发牢骚”逻辑
-│       ├── PlayerManagerMixin.java # 拦截所有聊天广播，用于给假人加前缀
+│       ├── PlayerManagerMixin.java # 【耳朵】拦截全局聊天，让假人能“听见”玩家说话并产生互动
 │       ├── CommandManagerMixin.java # 拦截管理员命令
 │       ├── ServerPlayNetworkHandlerMixin.java # 处理底层的网络交互数据
 │       ├── ServerCommonNetworkHandlerLatencyAccessor.java # 获取玩家真实延迟
