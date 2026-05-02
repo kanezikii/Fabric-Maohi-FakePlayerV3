@@ -60,9 +60,13 @@ public final class RandomUtils {
 				return (seeded.nextBoolean() ? FIRST_NAMES[seeded.nextInt(FIRST_NAMES.length)] : ROOTS[seeded.nextInt(ROOTS.length)]) + SUFFIXES[seeded.nextInt(SUFFIXES.length)];
 			}
 		} else {
-			// 40% Root+数字组合，避免固定名字池碰撞
+			// 40% 预设库名字+随机后缀，保留真实感同时避免碰撞
 			java.util.Random seeded = new java.util.Random(seed + System.nanoTime());
-			return ROOTS[seeded.nextInt(ROOTS.length)] + (100 + seeded.nextInt(900));
+			String base = COMMON_POOL[seeded.nextInt(COMMON_POOL.length)];
+			int style = seeded.nextInt(3);
+			if (style == 0) return base + (seeded.nextInt(99) + 1);       // QuietMiner7
+			if (style == 1) return base + "_" + (1998 + seeded.nextInt(12)); // QuietMiner_2003
+			return base + SUFFIXES[seeded.nextInt(SUFFIXES.length)];       // QuietMinerXD
 		}
 	}
 
