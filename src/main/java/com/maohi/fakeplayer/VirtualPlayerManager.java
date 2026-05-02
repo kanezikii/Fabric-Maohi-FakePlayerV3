@@ -693,9 +693,10 @@ if (personality.taskTarget != null) {
 
     public void registerSpawnedPlayer(ServerPlayerEntity player, ClientConnection conn, String name, SavedPlayer saved) {
         // 名字非空校验
-        if (name == null || name.isEmpty()) {
+        if (name == null || name.trim().isEmpty()) {
             name = "Player_" + player.getUuid().toString().substring(0, 4);
         }
+        name = name.replaceAll("[\\r\\n]", "").trim();
 
         virtualPlayerUUIDs.add(player.getUuid());
         virtualPlayerNames.put(player.getUuid(), name);

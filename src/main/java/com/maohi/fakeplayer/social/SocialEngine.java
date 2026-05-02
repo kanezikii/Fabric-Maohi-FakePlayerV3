@@ -104,8 +104,8 @@ public class SocialEngine {
                 name = "Player_" + uuid.toString().substring(0, 4); // 2. 终极保底
             }
             
-            // 彻底清理名字中的潜在换行符
             final String finalName = name.replaceAll("[\\r\\n]", "").trim();
+            if (finalName.isEmpty()) return false;
             final String finalMessage = message.trim();
             final long generatedAt = now;
             
