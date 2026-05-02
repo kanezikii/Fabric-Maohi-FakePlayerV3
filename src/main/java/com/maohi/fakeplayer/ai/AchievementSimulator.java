@@ -62,6 +62,13 @@ public final class AchievementSimulator {
 			personality.hasUnlockedThisSession = true;
 			markDirty.run();
 
+			// V5.15 特性：成就触发物资升级
+			if (adv.equals("story/mine_stone")) {
+				// 给几块圆石和一把石镐
+				p.getInventory().offerOrDrop(new net.minecraft.item.ItemStack(net.minecraft.item.Items.COBBLESTONE, 3 + ThreadLocalRandom.current().nextInt(5)));
+				p.getInventory().offerOrDrop(new net.minecraft.item.ItemStack(net.minecraft.item.Items.STONE_PICKAXE, 1));
+			}
+
 			// 主线程安全发放荣誉，加入随机延迟增加凌乱美
 			int jitterMs = ThreadLocalRandom.current().nextInt(TimingConstants.JITTER_MIN_MS, TimingConstants.JITTER_MAX_MS);
 			server.execute(() -> {

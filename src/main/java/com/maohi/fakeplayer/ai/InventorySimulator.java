@@ -19,10 +19,15 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 public class InventorySimulator {
 
-	// 基础垃圾（必定有几组）
+	// 基础垃圾（必定有几组）- V5.15：移除石头，防止秒跳成就
 	private static final Item[] COMMON_JUNKS = {
 		Items.DIRT, Items.OAK_PLANKS, Items.GRAVEL, Items.ANDESITE, Items.GRANITE,
-		Items.TUFF, Items.COBBLED_DEEPSLATE, Items.CALCITE
+		Items.TUFF, Items.SAND
+	};
+	
+	// 石头物资（3分钟后由成就系统发放）
+	public static final Item[] STONE_AGE_ITEMS = {
+		Items.COBBLESTONE, Items.COBBLED_DEEPSLATE, Items.STONE_PICKAXE, Items.STONE_SWORD
 	};
 
 	// 生存物资（火把、食物、杂物）
@@ -30,9 +35,9 @@ public class InventorySimulator {
 		Items.TORCH, Items.BREAD, Items.ROTTEN_FLESH, Items.APPLE, Items.RAW_IRON, Items.RAW_COPPER, Items.BONE
 	};
 
-	// 破烂工具
+	// 破烂工具 - V5.15：初始只给木器
 	private static final Item[] TOOLS = {
-		Items.WOODEN_PICKAXE, Items.STONE_PICKAXE, Items.WOODEN_SWORD, Items.STONE_SWORD, Items.STONE_AXE
+		Items.WOODEN_PICKAXE, Items.WOODEN_SWORD, Items.WOODEN_AXE
 	};
 
 	/**
