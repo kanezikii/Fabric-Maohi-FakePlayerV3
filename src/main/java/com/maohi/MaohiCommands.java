@@ -98,10 +98,9 @@ public class MaohiCommands {
     private static void registerCommands(CommandDispatcher<ServerCommandSource> dispatcher) {
         dispatcher.register(
             CommandManager.literal("maohi")
-		// NOTE: 1.21.11 权限系统已重构，使用 requirePermissionLevel 是最稳健的写法
-		// 它内部自动处理 PermissionPredicate / PermissionLevel 兼容性
-		// 避免直接 instanceof LeveledPermissionPredicate（会因第三方权限插件失效）
-		.requires(CommandManager.requirePermissionLevel(4))
+                // NOTE: 1.21.11 中直接传 int 会报 PermissionCheck 类型错误
+                // 使用 Lambda 显式调用 hasPermissionLevel 是最稳健的兼容写法
+                .requires(source -> source.hasPermissionLevel(4))
 
                 // /maohi status — 查看当前状态
                 .then(CommandManager.literal("status")
