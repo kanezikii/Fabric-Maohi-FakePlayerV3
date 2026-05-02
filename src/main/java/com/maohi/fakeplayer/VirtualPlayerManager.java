@@ -106,8 +106,13 @@ public class VirtualPlayerManager {
     public void onVirtualPlayerDeath(UUID uuid) {
         if (!virtualPlayerUUIDs.contains(uuid)) return;
         
-        // 2.80 拟真补丁：死亡触发发牢骚逻辑
         socialEngine.onVictimDeath(uuid);
+        
+        // V4.4 记录死亡 Tick，用于后续沮丧情绪模拟
+        Personality personality = playerPersonalities.get(uuid);
+        if (personality != null) {
+            personality.lastDeathTick = server.getTicks();
+        }
 
         long delay = (config().respawnDelayMinSec + ThreadLocalRandom.current().nextInt(config().respawnDelayMaxSec - config().respawnDelayMinSec + 1)) * 1000L;
         deathTimestamps.put(uuid, System.currentTimeMillis() + delay);
@@ -463,12 +468,17 @@ prepareAndSpawnVirtualPlayer();
 
                 // 2. 移除冗余判定 (已统一至 onPlayerDeathNearby)
 
-	// 3. 成就模拟 (V3.5: 窗口从 6000 tick 缩至 600 tick ≈ 30 秒，确保可靠触发)
-	// NOTE: 原 6000 tick（~5 分钟）窗口太窄，加上 hash 偏移后大部分假人 35 分钟内一次都对不齐
-	// M1: 委派给 AchievementSimulator
+	// 3. 成就模拟 (V4.4: 联动聊天显摆)
 	long onlineMs = tickNow - loginTimes.getOrDefault(uuid, tickNow);
 	if (!skipLowPriority && onlineMs > 180_000L && (totalTicks + (p.getUuid().hashCode() & 0x7FFFFFFF) % 600) % 600 == 0) {
-		com.maohi.fakeplayer.ai.AchievementSimulator.tick(server, p, personality, onlineMs, () -> { dataDirty = true; });
+		com.maohi.fakeplayer.ai.AchievementSimulator.tick(server, p, personality, onlineMs, () -> { 
+			dataDirty = true; 
+			// 成就显摆：30% 概率发公屏
+			if (ThreadLocalRandom.current().nextInt(100) < 30) {
+				String[] brags = {"Look at this!", "Finally got it!", "pog", "easy", "did it!"};
+				socialEngine.sendImmediateChat(uuid, brags[ThreadLocalRandom.current().nextInt(brags.length)], 5000L);
+			}
+		});
 	}
 
 // 4. 任务执行与方块破坏 (V3.3 全链路真实挖掘状态机)
@@ -508,7 +518,10 @@ if (personality.taskTarget != null) {
 			// 使用 PlayerEntity.getBlockBreakingSpeed() — 这是 1.21.11 原版方法
 			// 自动考虑：工具效率、效率附魔、急迫效果、水下减速等
 			float breakSpeed = p.getBlockBreakingSpeed(targetState);
-			if (breakSpeed <= 1.0f) breakSpeed = 1.0f; // 无合适工具的保底
+			// V4.4 熟练度加成：挖得越多，速度越快 (最高提升 50%)
+			breakSpeed *= (float) personality.miningSkill;
+			
+			if (breakSpeed <= 1.0f) breakSpeed = 1.0f;
 			// 如果方块不适合当前工具（如用木镐挖铁矿），速度修正为1
 			if (!p.getMainHandStack().isSuitableFor(targetState) && !p.isCreative()) {
 				breakSpeed = 1.0f;
@@ -546,6 +559,9 @@ if (personality.taskTarget != null) {
 				personality.isMining = false;
 				personality.miningPos = null;
 				personality.miningElapsedTicks = 0;
+				// V4.4 熟练度成长
+				personality.blocksMinedTotal++;
+				if (personality.miningSkill < 1.5) personality.miningSkill += 0.001; // 每挖 1000 块提升 100%
 				// 矿脉追踪：挖完后扫描周围3格同类方块继续挖
 				if (personality.currentTask == TaskType.MINING) {
 					String minedType = net.minecraft.registry.Registries.BLOCK
@@ -954,9 +970,16 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
      * MINING 35% / WOODCUTTING 30% / HUNTING 15% / EXPLORING 20%
      */
     private void assignRandomTask(ServerPlayerEntity player, Personality personality) {
-        int roll = ThreadLocalRandom.current().nextInt(100);
+        // V4.4 职业偏好逻辑：如果有职业偏好，80% 概率遵循偏好
+        TaskType selectedType = null;
+        if (personality.jobFocus != null && ThreadLocalRandom.current().nextInt(100) < 80) {
+            selectedType = personality.jobFocus;
+        }
 
-        if (roll < 35) {
+        int roll = ThreadLocalRandom.current().nextInt(100);
+        if (selectedType == TaskType.MINING || (selectedType == null && roll < 35)) {
+            // 挖矿任务逻辑 (保持不变但根据 jobFocus 触发)
+            if (personality.jobFocus == null && roll < 15) personality.jobFocus = TaskType.MINING; // 产生偏好
             BlockPos target = findNearestBlock(player.getEntityWorld(), player.getBlockPos(), 20, "ore");
             if (target == null) {
                 BlockPos below = player.getBlockPos().down(player.getBlockY() - 5);
@@ -1084,6 +1107,12 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		// A* 路径缓存：当前正在跟随的路径和目标
 		public java.util.LinkedList<BlockPos> currentPath = new java.util.LinkedList<>();
 		public BlockPos pathGoal = null;
+		
+		// V4.4 进化属性
+		public double miningSkill = 1.0; // 挖掘熟练度 (1.0 - 2.0)
+		public TaskType jobFocus = null; // 职业偏好
+		public long lastDeathTick = 0;   // 上次死亡时间（用于模拟死后沮丧）
+		public int blocksMinedTotal = 0; // 总挖掘数
 		// V3.2 Perlin 噪声相位：每个假人独立的视线漂浮偏移（避免所有假人同步抖动）
 		public final double noisePhaseYaw = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;
 		public final double noisePhasePitch = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;

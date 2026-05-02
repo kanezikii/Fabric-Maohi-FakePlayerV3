@@ -170,7 +170,15 @@ public class MovementController {
 			float lateralDrift = perlinLike(noisePhaseYaw * 1.2, noiseTime, 0.5f);
 			if (ThreadLocalRandom.current().nextInt(150) == 0)
 				lateralDrift += ThreadLocalRandom.current().nextFloat() * 0.8f - 0.4f;
-			setMovement(p, 0.8f + ThreadLocalRandom.current().nextFloat() * 0.2f, lateralDrift);
+			
+			// V4.4 情绪修正：死后 5 分钟内速度降低 30% (跑尸沮丧模拟)
+			float speedFactor = 1.0f;
+			long serverTicks = p.getEntityWorld().getServer().getTicks();
+			if (pers != null && serverTicks - pers.lastDeathTick < 6000) {
+				speedFactor = 0.7f;
+			}
+			
+			setMovement(p, (0.8f + ThreadLocalRandom.current().nextFloat() * 0.2f) * speedFactor, lateralDrift * speedFactor);
 			p.travel(new Vec3d(p.sidewaysSpeed, 0, p.forwardSpeed));
 		}
 
