@@ -276,12 +276,20 @@ public class SurvivalMechanics {
 		return -1;
 	}
 
-	/** 在快捷栏中寻找治疗药水 */
+	/** 在快捷栏中寻找治疗药水 (1.21.11 组件化适配) */
 	private static int findPotionSlot(PlayerInventory inv) {
 		for (int i = 0; i < 9; i++) {
 			ItemStack stack = inv.getStack(i);
 			if (!stack.isEmpty() && stack.isOf(Items.POTION)) {
-				return i;
+				// 获取药水组件数据
+				net.minecraft.component.type.PotionContentsComponent contents = stack.get(net.minecraft.component.DataComponentTypes.POTION_CONTENTS);
+				if (contents != null && contents.potion().isPresent()) {
+					String potionId = contents.potion().get().value().finishType().toString();
+					// 只喝治疗或强效治疗药水
+					if (potionId.contains("healing")) {
+						return i;
+					}
+				}
 			}
 		}
 		return -1;
