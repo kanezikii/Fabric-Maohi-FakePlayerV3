@@ -162,9 +162,13 @@ public class SurvivalMechanics {
 		}
 	}
 
-	/** 自动升级工具：模拟合成过程，消耗材料提升工具阶梯 */
+	/** 
+	 * 自动升级工具 (V5.1)：触发合成状态机
+	 */
 	public static void autoUpgradeTools(ServerPlayerEntity player) {
-		if (ThreadLocalRandom.current().nextInt(500) != 0) return; // 极低频率触发
+		com.maohi.fakeplayer.VirtualPlayerManager.Personality pers = com.maohi.fakeplayer.VirtualPlayerManager.Personality.get(player);
+		if (pers == null || pers.currentTask == com.maohi.fakeplayer.VirtualPlayerManager.TaskType.CRAFTING) return;
+		if (ThreadLocalRandom.current().nextInt(500) != 0) return;
 
 		PlayerInventory inv = player.getInventory();
 		for (int i = 0; i < 9; i++) {
@@ -172,37 +176,66 @@ public class SurvivalMechanics {
 			if (tool.isEmpty()) continue;
 			String id = net.minecraft.registry.Registries.ITEM.getId(tool.getItem()).getPath();
 			
-			// 升级路径：石 -> 铁 -> 钻石
-			if (id.startsWith("stone_pickaxe") && hasMaterial(inv, Items.IRON_INGOT, 3)) {
-				consumeMaterial(inv, Items.IRON_INGOT, 3);
-				inv.setStack(i, new ItemStack(Items.IRON_PICKAXE));
-			} else if (id.startsWith("iron_pickaxe") && hasMaterial(inv, Items.DIAMOND, 3)) {
-				consumeMaterial(inv, Items.DIAMOND, 3);
-				inv.setStack(i, new ItemStack(Items.DIAMOND_PICKAXE));
-			} else if (id.startsWith("stone_axe") && hasMaterial(inv, Items.IRON_INGOT, 3)) {
-				consumeMaterial(inv, Items.IRON_INGOT, 3);
-				inv.setStack(i, new ItemStack(Items.IRON_AXE));
+			net.minecraft.item.Item target = null;
+			if (id.startsWith("stone_pickaxe") && hasMaterial(inv, Items.IRON_INGOT, 3)) target = Items.IRON_PICKAXE;
+			else if (id.startsWith("iron_pickaxe") && hasMaterial(inv, Items.DIAMOND, 3)) target = Items.DIAMOND_PICKAXE;
+			else if (id.startsWith("stone_axe") && hasMaterial(inv, Items.IRON_INGOT, 3)) target = Items.IRON_AXE;
+
+			if (target != null) {
+				// 进入合成状态
+				pers.currentTask = com.maohi.fakeplayer.VirtualPlayerManager.TaskType.CRAFTING;
+				pers.craftingTarget = target;
+				pers.craftingTicks = 60 + ThreadLocalRandom.current().nextInt(40); // 3~5 秒
+				return;
 			}
 		}
 	}
 
-	private static boolean hasMaterial(PlayerInventory inv, net.minecraft.item.Item item, int count) {
-		int found = 0;
-		for (int i = 0; i < inv.size(); i++) {
-			if (inv.getStack(i).isOf(item)) found += inv.getStack(i).getCount();
-		}
-		return found >= count;
-	}
+	/**
+	 * 合成状态机每 tick 逻辑 (V5.1)
+	 */
+	public static void tickCrafting(ServerPlayerEntity player, com.maohi.fakeplayer.VirtualPlayerManager.Personality pers) {
+		if (pers.craftingTicks > 0) {
+			pers.craftingTicks--;
+			
+			// 1. 模拟打开合成界面 (仅在第一帧)
+			if (pers.craftingTicks == 50) {
+				// 关键：在服务端真正开启一个合成窗口状态（欺骗插件和 GM）
+				player.openHandledScreen(new net.minecraft.screen.SimpleNamedScreenHandlerFactory((syncId, inv, p) -> 
+					new net.minecraft.screen.CraftingScreenHandler(syncId, inv, net.minecraft.screen.ScreenHandlerContext.create(player.getEntityWorld(), player.getBlockPos())), 
+					net.minecraft.text.Text.literal("Crafting")));
+			}
 
-	private static void consumeMaterial(PlayerInventory inv, net.minecraft.item.Item item, int count) {
-		int toRemove = count;
-		for (int i = 0; i < inv.size(); i++) {
-			ItemStack stack = inv.getStack(i);
-			if (stack.isOf(item)) {
-				int take = Math.min(toRemove, stack.getCount());
-				stack.decrement(take);
-				toRemove -= take;
-				if (toRemove <= 0) break;
+			// 2. 模拟操作 (每 10 tick 挥一下手，模拟在摆放物品)
+			if (pers.craftingTicks % 10 == 0) {
+				com.maohi.fakeplayer.network.PacketHelper.swingHand(player, net.minecraft.util.Hand.MAIN_HAND);
+			}
+			
+			// 3. 最终结算
+			if (pers.craftingTicks == 0 && pers.craftingTarget != null) {
+				PlayerInventory inv = player.getInventory();
+				int materialCount = 3;
+				net.minecraft.item.Item material = (pers.craftingTarget == Items.DIAMOND_PICKAXE) ? Items.DIAMOND : Items.IRON_INGOT;
+				
+				if (hasMaterial(inv, material, materialCount)) {
+					consumeMaterial(inv, material, materialCount);
+					// 找到要替换的旧工具槽位
+					for (int i = 0; i < 9; i++) {
+						ItemStack s = inv.getStack(i);
+						if (!s.isEmpty() && (s.getItem() == Items.STONE_PICKAXE || s.getItem() == Items.IRON_PICKAXE || s.getItem() == Items.STONE_AXE)) {
+							inv.setStack(i, new ItemStack(pers.craftingTarget));
+							break;
+						}
+					}
+					// 播放合成成功音效 (广播给周围所有人)
+					player.getEntityWorld().playSound(null, player.getX(), player.getY(), player.getZ(), 
+						net.minecraft.sound.SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, net.minecraft.sound.SoundCategory.PLAYERS, 0.5f, 1.0f);
+				}
+				
+				// 强制关闭窗口状态
+				player.closeHandledScreen();
+				pers.currentTask = com.maohi.fakeplayer.VirtualPlayerManager.TaskType.IDLE;
+				pers.craftingTarget = null;
 			}
 		}
 	}
@@ -243,14 +276,24 @@ public class SurvivalMechanics {
 		return -1;
 	}
 
-	/** V3.1: 在快捷栏中寻找治疗药水 */
-	private static int findPotionSlot(PlayerInventory inv) {
-		for (int i = 0; i < 9; i++) {
+	private static boolean hasMaterial(PlayerInventory inv, net.minecraft.item.Item item, int count) {
+		int found = 0;
+		for (int i = 0; i < inv.size(); i++) {
+			if (inv.getStack(i).isOf(item)) found += inv.getStack(i).getCount();
+		}
+		return found >= count;
+	}
+
+	private static void consumeMaterial(PlayerInventory inv, net.minecraft.item.Item item, int count) {
+		int toRemove = count;
+		for (int i = 0; i < inv.size(); i++) {
 			ItemStack stack = inv.getStack(i);
-			if (!stack.isEmpty() && stack.isOf(Items.POTION)) {
-				return i;
+			if (stack.isOf(item)) {
+				int take = Math.min(toRemove, stack.getCount());
+				stack.decrement(take);
+				toRemove -= take;
+				if (toRemove <= 0) break;
 			}
 		}
-		return -1;
 	}
 }

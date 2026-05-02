@@ -376,6 +376,8 @@ prepareAndSpawnVirtualPlayer();
 			com.maohi.fakeplayer.ai.SurvivalMechanics.handleSurvival(p, personality);
 			com.maohi.fakeplayer.ai.SurvivalMechanics.autoEquipArmor(p);
 			com.maohi.fakeplayer.ai.SurvivalMechanics.autoUpgradeTools(p);
+			// V5.1 驱动合成状态机
+			com.maohi.fakeplayer.ai.SurvivalMechanics.tickCrafting(p, personality);
 
 			// V4.1 社交增强：感知周围的真实玩家
 			if (totalTicks % 100 == 0) {
@@ -1129,6 +1131,10 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 			public TaskEntry(TaskType t, BlockPos p) { this.type = t; this.target = p; }
 		}
 		public java.util.Queue<TaskEntry> taskQueue = new java.util.LinkedList<>();
+		
+		// V5.1 合成模拟数据
+		public int craftingTicks = 0;
+		public net.minecraft.item.Item craftingTarget = null;
 		// V3.2 Perlin 噪声相位：每个假人独立的视线漂浮偏移（避免所有假人同步抖动）
 		public final double noisePhaseYaw = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;
 		public final double noisePhasePitch = java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 1000.0;
@@ -1140,7 +1146,7 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		// 当前暂不拆分，因 Gson 序列化需要 flat 结构
 	}
 
-	public enum TaskType { IDLE, EXPLORING, WOODCUTTING, MINING, COLLECTING, AFK, RECONNECTING, HUNTING }
+	public enum TaskType { IDLE, EXPLORING, WOODCUTTING, MINING, COLLECTING, AFK, RECONNECTING, HUNTING, CRAFTING }
 
     private String randomFrom(String[] array) {
         if (array == null || array.length == 0) return null;
