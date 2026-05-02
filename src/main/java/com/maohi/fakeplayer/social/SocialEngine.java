@@ -124,10 +124,10 @@ public class SocialEngine {
                     online -> online.sendMessage(chatText, false)
                 );
                 
-                // 2. 终极修复：直接向标准输出打印。
-                // 注意：不要手动加时间戳和 [INFO] 前缀，服务器会自动加。
-                // 只打印标准聊天内容格式: <Name> Message
-                System.out.println("<" + finalName + "> " + finalMessage);
+                // 2. 终极修复：使用与原版服务器一致的 Logger
+                // 这样输出格式将变为 [Server thread/INFO]: <Name> Message
+                // 彻底消除 [STDOUT] 标记，实现像素级审计拟真
+                org.slf4j.LoggerFactory.getLogger("Server thread").info("<{}> {}", finalName, finalMessage);
             });
             return true;
         } finally {
