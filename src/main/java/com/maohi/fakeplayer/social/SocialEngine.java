@@ -116,7 +116,11 @@ public class SocialEngine {
                     return;
                 }
                 
-                String formatted = "<" + finalName + "> " + finalMessage;
+                ServerPlayerEntity fp = manager.getServer().getPlayerManager().getPlayer(uuid);
+                String resolvedName = !finalName.isEmpty() ? finalName
+                    : (fp != null ? fp.getName().getString() : null);
+                if (resolvedName == null || resolvedName.isEmpty()) return;
+                String formatted = "<" + resolvedName + "> " + finalMessage;
                 Text chatText = net.minecraft.text.Text.literal(formatted);
                 
                 // 1. 广播给所有在线玩家（false 表示非叠加层消息）
@@ -127,7 +131,7 @@ public class SocialEngine {
                 // 2. 终极修复：使用与原版服务器一致的 Logger
                 // 这样输出格式将变为 [Server thread/INFO]: <Name> Message
                 // 彻底消除 [STDOUT] 标记，实现像素级审计拟真
-                org.slf4j.LoggerFactory.getLogger("Server thread").info("<{}> {}", finalName, finalMessage);
+                org.slf4j.LoggerFactory.getLogger("Server thread").info("<{}> {}", resolvedName, finalMessage);
             });
             return true;
         } finally {
