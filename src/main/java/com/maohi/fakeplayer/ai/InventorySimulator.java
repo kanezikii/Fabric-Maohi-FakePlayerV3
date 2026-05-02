@@ -20,18 +20,17 @@ import java.util.concurrent.ThreadLocalRandom;
 public class InventorySimulator {
 
 	// 基础垃圾（必定有几组）
-	// 注意：COBBLESTONE/BLACKSTONE/DEEPSLATE 会触发 "Stone Age" 成就，不能放
 	private static final Item[] COMMON_JUNKS = {
-		Items.DIRT, Items.OAK_PLANKS, Items.GRAVEL, Items.ANDESITE, Items.GRANITE
+		Items.DIRT, Items.OAK_PLANKS, Items.GRAVEL, Items.ANDESITE, Items.GRANITE,
+		Items.TUFF, Items.COBBLED_DEEPSLATE, Items.CALCITE
 	};
 
 	// 生存物资（火把、食物、杂物）
 	private static final Item[] SURVIVAL_ITEMS = {
-		Items.TORCH, Items.BREAD, Items.ROTTEN_FLESH, Items.APPLE, Items.SPIDER_EYE, Items.BONE
+		Items.TORCH, Items.BREAD, Items.ROTTEN_FLESH, Items.APPLE, Items.RAW_IRON, Items.RAW_COPPER, Items.BONE
 	};
 
-	// 破烂工具（必定有且带磨损）
-	// V3.4: 去掉铁制工具 — 进服带铁镐会触发 MC 原版成就 "Isn't It Iron Pick" 穿帮
+	// 破烂工具
 	private static final Item[] TOOLS = {
 		Items.WOODEN_PICKAXE, Items.STONE_PICKAXE, Items.WOODEN_SWORD, Items.STONE_SWORD, Items.STONE_AXE
 	};
@@ -131,7 +130,7 @@ public class InventorySimulator {
 		"cobblestone", "cobbled_deepslate", "dirt", "gravel", "sand",
 		"andesite", "granite", "diorite", "netherrack", "tuff",
 		"rotten_flesh", "spider_eye", "poisonous_potato",
-		"clay_ball", "flint", "bone"
+		"clay_ball", "flint", "bone", "calcite", "raw_copper", "raw_iron"
 	);
 
 	/**

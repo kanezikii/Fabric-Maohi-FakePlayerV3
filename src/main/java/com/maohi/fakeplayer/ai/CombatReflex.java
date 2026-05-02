@@ -43,12 +43,28 @@ public class CombatReflex {
 	 * @return true 表示正在逃跑（需要 MovementController 暂停寻路）
 	 */
 	public static boolean executeCombatLogic(ServerPlayerEntity player) {
-		// 1. 获取周围 6 格内的实体
+		// 1. 获取周围实体
 		List<Entity> entities = player.getEntityWorld().getOtherEntities(
-			player, player.getBoundingBox().expand(6.0)
+			player, player.getBoundingBox().expand(12.0)
 		);
 
-		// 2. 优先级1：检测苦力怕 → 逃跑
+		// 2. ★ 自动持盾 (V4.2)：检测远程威胁
+		boolean hasShield = player.getOffHandStack().isOf(net.minecraft.item.Items.SHIELD);
+		if (hasShield) {
+			boolean underRangedAttack = false;
+			for (Entity entity : entities) {
+				if (entity instanceof net.minecraft.entity.mob.SkeletonEntity || entity instanceof net.minecraft.entity.mob.PillagerEntity) {
+					if (entity.isAlive() && player.squaredDistanceTo(entity) < 144.0) {
+						underRangedAttack = true;
+						break;
+					}
+				}
+			}
+			// 被瞄准时自动潜行举盾
+			player.setSneaking(underRangedAttack);
+		}
+
+		// 3. 优先级1：检测苦力怕 → 逃跑
 		for (Entity entity : entities) {
 			if (entity instanceof CreeperEntity creeper && creeper.isAlive()) {
 				double distSq = player.squaredDistanceTo(creeper);
@@ -58,7 +74,7 @@ public class CombatReflex {
 			}
 		}
 
-		// 3. 优先级2：其他敌对生物 → 反击（走真实链路）
+		// 4. 优先级2：其他敌对生物 → 反击
 		for (Entity entity : entities) {
 			if (entity instanceof HostileEntity hostile && hostile.isAlive()
 				&& !(entity instanceof CreeperEntity)) {
@@ -69,31 +85,33 @@ public class CombatReflex {
 				float targetYaw = (float) (Math.toDegrees(Math.atan2(-dx, dz)));
 				player.setYaw(targetYaw);
 
-				// V3.3: 攻击冷却检查 + 真实链路攻击
+				// ★ 环绕走位 (Strafe)：在战斗中左右横跳
 				if (player.squaredDistanceTo(hostile) < 16.0) {
+					// 随机生成一个侧向速度，模拟左右躲闪
+					float strafeDirection = (player.getId() % 2 == 0) ? 1.0f : -1.0f;
+					if (ThreadLocalRandom.current().nextInt(20) == 0) strafeDirection *= -1; // 随机反转方向
+					player.sidewaysSpeed = 0.5f * strafeDirection;
+					player.forwardSpeed = 0.3f; // 缓慢向前逼近
+					
 					float cooldown = player.getAttackCooldownProgress(0.5f);
 					if (cooldown >= ATTACK_COOLDOWN_THRESHOLD) {
-						// ★ 全链路真实攻击：发包+调方法双保险
-						// 服务端自动处理：扣血→死亡→掉落物→经验球
+						// 跳劈模拟 (XP > 10 解锁)
+						if (player.experienceLevel > 10 && player.isOnGround() && ThreadLocalRandom.current().nextInt(3) == 0) {
+							player.jump();
+						}
+						
 						com.maohi.fakeplayer.network.PacketHelper.attackEntity(player, hostile);
 						
-				// 攻击后有 10-25 tick 的"收招延迟"（真人不可能连点）
-					// M2 fix: per-player attack tick → 从 VPM 获取 Personality 实例
-					com.maohi.fakeplayer.VirtualPlayerManager vpm = com.maohi.Maohi.getVirtualPlayerManager();
-					if (vpm != null) {
-						VirtualPlayerManager.Personality pers = vpm.getPersonality(player.getUuid());
-						if (pers != null) {
-							pers.lastAttackTick = player.getEntityWorld().getServer().getTicks();
+						com.maohi.fakeplayer.VirtualPlayerManager vpm = com.maohi.Maohi.getVirtualPlayerManager();
+						if (vpm != null) {
+							com.maohi.fakeplayer.VirtualPlayerManager.Personality pers = vpm.getPersonality(player.getUuid());
+							if (pers != null) {
+								pers.lastAttackTick = player.getEntityWorld().getServer().getTicks();
+							}
 						}
-					}
-						
-						// V3.3: 删除了 LootTracker.onMobKilled()
-						// 原因：攻击走真实链路后，服务端自动派发经验球+掉落物
-						// 不需要手动 addExperience
 					}
 				}
 
-				// 每次 Tick 只处理一个最优先的目标
 				return false;
 			}
 		}
