@@ -189,33 +189,95 @@ public class ActionSimulator {
 	}
 
 	/**
-	 * 尝试打开附近的门 — 走真实发包
+	 * 尝试打开附近的门或箱子 — 走真实发包
 	 */
 	private static boolean tryOpenDoor(ServerPlayerEntity player) {
 		BlockPos pos = player.getBlockPos();
 		net.minecraft.server.world.ServerWorld world = player.getEntityWorld();
 
-		// 检测周围 2 格内是否有门
 		for (int dx = -2; dx <= 2; dx++) {
 			for (int dz = -2; dz <= 2; dz++) {
 				for (int dy = -1; dy <= 1; dy++) {
 					BlockPos checkPos = pos.add(dx, dy, dz);
 					net.minecraft.block.BlockState state = world.getBlockState(checkPos);
-					if (state.getBlock() instanceof net.minecraft.block.DoorBlock) {
-						// ★ 走真实发包：右键交互方块
+					if (state.getBlock() instanceof net.minecraft.block.DoorBlock || state.getBlock() instanceof net.minecraft.block.ChestBlock) {
 						net.minecraft.util.hit.BlockHitResult hitResult = 
 							new net.minecraft.util.hit.BlockHitResult(
 								net.minecraft.util.math.Vec3d.ofCenter(checkPos),
 								net.minecraft.util.math.Direction.UP,
 								checkPos, false
 							);
-						com.maohi.fakeplayer.network.PacketHelper.interactBlock(
-							player, net.minecraft.util.Hand.MAIN_HAND, hitResult);
+						com.maohi.fakeplayer.network.PacketHelper.interactBlock(player, net.minecraft.util.Hand.MAIN_HAND, hitResult);
 						return true;
 					}
 				}
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * 与真实玩家进行高级互动 (V4.3)
+	 * 包括视线追踪、对视、以及 Shift 蹲起回礼
+	 */
+	public static void interactWithRealPlayer(ServerPlayerEntity fake, ServerPlayerEntity real) {
+		double distSq = fake.squaredDistanceTo(real);
+		if (distSq > 36.0) return; // 距离太远不互动
+
+		// 1. 视线追踪 (对视)
+		// 如果玩家正在看假人（视线夹角小），假人有 40% 概率回望
+		net.minecraft.util.math.Vec3d fakeToReal = real.getEyePos().subtract(fake.getEyePos()).normalize();
+		net.minecraft.util.math.Vec3d playerLook = real.getRotationVec(1.0f);
+		double dot = playerLook.dotProduct(fakeToReal.negate());
+		
+		if (dot > 0.95) { // 玩家正在盯着假人看
+			if (ThreadLocalRandom.current().nextInt(100) < 40) {
+				fake.lookAt(net.minecraft.command.argument.EntityAnchorArgumentType.EntityAnchor.EYES, real.getEyePos());
+			}
+		}
+
+		// 2. Shift 蹲起回礼 (Minecraft 国际通用友好信号)
+		if (real.isSneaking() && ThreadLocalRandom.current().nextInt(10) < 3) {
+			fake.setSneaking(true);
+			// 延迟一会再站起来
+			com.maohi.Maohi.getVirtualPlayerManager().getServer().execute(() -> {
+				try { Thread.sleep(200); } catch (Exception ignored) {}
+				fake.setSneaking(false);
+			});
+		}
+	}
+
+	/**
+	 * 随机放置告示牌并留言 (V4.3)
+	 * 极低概率触发，用于在地图上留下"活人"存在的痕迹
+	 */
+	public static void tryPlaceRandomSign(ServerPlayerEntity player) {
+		if (ThreadLocalRandom.current().nextInt(2000) != 0) return; // 极低频率
+
+		BlockPos pos = player.getBlockPos();
+		net.minecraft.world.World world = player.getEntityWorld();
+		
+		// 寻找可以放告示牌的地面
+		BlockPos signPos = pos.offset(player.getHorizontalFacing());
+		if (world.getBlockState(signPos).isAir() && !world.getBlockState(signPos.down()).isAir()) {
+			// 放置告示牌方块
+			world.setBlockState(signPos, net.minecraft.block.Blocks.OAK_SIGN.getDefaultState());
+			
+			// 随机留言内容
+			String[] messages = {
+				"I was here!", "So many zombies...", "Diamond found!", 
+				"Nice place.", "Need more food", "Help!", "Mining day 1"
+			};
+			String text = messages[ThreadLocalRandom.current().nextInt(messages.length)];
+			
+			// 设置告示牌文字 (1.21.11 机制)
+			net.minecraft.block.entity.BlockEntity be = world.getBlockEntity(signPos);
+			if (be instanceof net.minecraft.block.entity.SignBlockEntity sign) {
+				sign.setText(new net.minecraft.block.entity.SignText().withMessage(0, net.minecraft.text.Text.literal(text)), true);
+			}
+			
+			// 动作模拟
+			com.maohi.fakeplayer.network.PacketHelper.swingHand(player, net.minecraft.util.Hand.MAIN_HAND);
+		}
 	}
 }

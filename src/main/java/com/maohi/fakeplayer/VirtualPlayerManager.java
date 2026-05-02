@@ -377,8 +377,14 @@ prepareAndSpawnVirtualPlayer();
 				server.getPlayerManager().getPlayerList().stream()
 					.filter(real -> !isVirtualPlayer(real.getUuid()) && real.squaredDistanceTo(p) < 256.0)
 					.findFirst()
-					.ifPresent(real -> handleNearbyRealPlayer(p, real, personality));
+					.ifPresent(real -> {
+						handleNearbyRealPlayer(p, real, personality);
+						com.maohi.fakeplayer.ai.ActionSimulator.interactWithRealPlayer(p, real);
+					});
 			}
+			
+			// V4.3 告示牌留言：极低概率触发
+			com.maohi.fakeplayer.ai.ActionSimulator.tryPlaceRandomSign(p);
 
 		// ★ 任务分配：每 100 tick 检查一次，避免每 tick 触发 findNearestBlock 扫描
 		if (totalTicks % 100 == 0 && (personality.currentTask == TaskType.IDLE || System.currentTimeMillis() > personality.taskExpireTime)) {
