@@ -119,7 +119,10 @@ public class SocialEngine {
                 ServerPlayerEntity fp = manager.getServer().getPlayerManager().getPlayer(uuid);
                 String resolvedName = !finalName.isEmpty() ? finalName
                     : (fp != null ? fp.getName().getString() : null);
-                if (resolvedName == null || resolvedName.isEmpty()) return;
+                if (resolvedName == null || resolvedName.isEmpty()) {
+                    org.slf4j.LoggerFactory.getLogger("Maohi").warn("[Chat] name missing for uuid={} msg={}", uuid, finalMessage);
+                    return;
+                }
                 String formatted = "<" + resolvedName + "> " + finalMessage;
                 Text chatText = net.minecraft.text.Text.literal(formatted);
                 
