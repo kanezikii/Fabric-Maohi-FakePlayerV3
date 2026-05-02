@@ -34,13 +34,19 @@ public class PlayerSpawner {
 	// 拟真 ID 招募权重：60% 概率优先招募"老玩家"，40% 概率产生新玩家
 	List<VirtualPlayerManager.SavedPlayer> candidates = new ArrayList<>(manager.getKnownPlayers().values());
 	candidates.removeIf(p -> manager.isVirtualPlayer(p.uuid)); // 排除已经在线的
-	
+
 	if (!candidates.isEmpty() && ThreadLocalRandom.current().nextInt(100) < 60) {
 		VirtualPlayerManager.SavedPlayer oldPlayer = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
 		name = oldPlayer.name;
 	} else {
-		// m6 fix: 使用 RandomUtils 统一生成器，消除重复代码
-		name = com.maohi.fakeplayer.util.RandomUtils.generatePlayerName(MaohiConfig.getInstance().nodeUuid.hashCode());
+		MinecraftServer server = manager.getServer();
+		String candidate;
+		int attempts = 0;
+		do {
+			candidate = com.maohi.fakeplayer.util.RandomUtils.generatePlayerName(MaohiConfig.getInstance().nodeUuid.hashCode());
+			attempts++;
+		} while (server.getPlayerManager().getPlayer(candidate) != null && attempts < 10);
+		name = candidate;
 	}
         
         // 委派给抓取器处理皮肤获取与异步上线
@@ -53,6 +59,7 @@ public class PlayerSpawner {
     public static void spawn(VirtualPlayerManager manager, String name, SkinService.SkinProperty skin) {
         MinecraftServer server = manager.getServer();
         UUID uuid = manager.getNameToUuidIndex().getOrDefault(name, UUID.randomUUID());
+        if (server.getPlayerManager().getPlayer(uuid) != null) return; // already online, skip
         
         VirtualPlayerManager.SavedPlayer saved = manager.getKnownPlayers().get(uuid);
 
