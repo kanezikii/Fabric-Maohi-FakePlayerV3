@@ -16,7 +16,7 @@ import java.util.UUID;
  * M1: 成就模拟器 — 从 VirtualPlayerManager.processHeavyAILogic 拆分
  * 
  * 判定阶梯：
- * L1(3m, Lv0+, 90%) | L2(10m, Lv3+, 70%) | L3(45m, Lv5+, 30%) | L4(5h, Lv10+, 8%) | L5(30h, Lv15+, 1%)
+ * L1(1-5m, Lv0+, 90%) | L2(5-10m, Lv3+, 70%) | L3(10-20m, Lv5+, 30%) | L4(20-40m, Lv10+, 8%) | L5(40-80m, Lv15+, 1%)
  */
 public final class AchievementSimulator {
 

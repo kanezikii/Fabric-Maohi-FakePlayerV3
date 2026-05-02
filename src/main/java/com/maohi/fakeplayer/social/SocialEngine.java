@@ -114,19 +114,17 @@ public class SocialEngine {
                     return;
                 }
                 
-                // NOTE: 不能用 online.sendMessage()，因为它会触发服务器内部的系统消息日志路径，导致控制台打印不带名字的原始内容。
-                // 正确做法：自己拼接原版格式，通过 broadcast 统一推送给玩家，并用专用 Logger 写控制台。
                 String formatted = "<" + finalName + "> " + finalMessage;
                 Text chatText = net.minecraft.text.Text.literal(formatted);
                 
-                // 1. 广播给所有在线玩家（走玩家频道，不触发系统消息日志）
+                // 1. 广播给所有在线玩家（false 表示非叠加层消息）
                 manager.getServer().getPlayerManager().getPlayerList().forEach(
                     online -> online.sendMessage(chatText, false)
                 );
                 
-                // 2. 用 Server thread Logger 确保控制台格式与原版一致
-                // 使用 "Minecraft" logger 名称确保输出带有 [Server thread/INFO] 前缀
-                org.slf4j.LoggerFactory.getLogger("Minecraft").info("<{}> {}", finalName, finalMessage);
+                // 2. 终极修复：直接向标准输出打印。这是确保控制台日志出现 [<Name> msg] 的最稳妥方案
+                // 这样能避开所有日志框架的过滤，格式与原版完全一致
+                System.out.println("[" + java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")) + "] [Server thread/INFO]: <" + finalName + "> " + finalMessage);
             });
             return true;
         } finally {
