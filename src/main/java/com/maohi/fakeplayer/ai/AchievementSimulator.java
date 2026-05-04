@@ -23,6 +23,17 @@ public final class AchievementSimulator {
 		"story/mine_stone", "story/upgrade_tools", "story/smelt_iron",
 		"story/mine_diamond", "nether/obtain_crying_obsidian"
 	};
+	
+	private static boolean isDiamondAchievement(String advancementId) {
+		return "story/mine_diamond".equals(advancementId)
+				|| "minecraft:story/mine_diamond".equals(advancementId);
+	}
+
+	private static boolean canGrantDiamondAchievement(VirtualPlayerManager.Personality personality) {
+		if (personality == null) return false;
+		if (personality.growthPhase != VirtualPlayerManager.GrowthPhase.DIAMOND_AGE) return false;
+		return personality.hasMinedDiamondOre;
+	}
 
 	/**
 	 * 检查并尝试解锁成就
@@ -50,11 +61,19 @@ public final class AchievementSimulator {
 		if (nextIdx == 0 && playtimeMs > TimingConstants.ACHIEVEMENT_TIER1_PLAYTIME && roll < 900) success = true;
 		else if (nextIdx == 1 && playtimeMs > TimingConstants.ACHIEVEMENT_TIER2_PLAYTIME && xpLevel >= 3 && roll < 700) success = true;
 		else if (nextIdx == 2 && playtimeMs > TimingConstants.ACHIEVEMENT_TIER3_PLAYTIME && xpLevel >= 5 && roll < 300) success = true;
-		else if (nextIdx == 3 && playtimeMs > TimingConstants.ACHIEVEMENT_TIER4_PLAYTIME && xpLevel >= 10 && roll < 80) success = true;
+		else if (nextIdx == 3 && playtimeMs > TimingConstants.ACHIEVEMENT_TIER4_PLAYTIME && xpLevel >= 10 && roll < 80) {
+			if (canGrantDiamondAchievement(personality)) {
+				success = true;
+			}
+		}
 		else if (nextIdx == 4 && playtimeMs > TimingConstants.ACHIEVEMENT_TIER5_PLAYTIME && xpLevel >= 15 && roll < 10) success = true;
 
 		if (success) {
 			String adv = ADV_SEQUENCE[nextIdx];
+			// 二次门禁校验（针对 Diamonds!）
+			if (isDiamondAchievement(adv) && !canGrantDiamondAchievement(personality)) {
+				return;
+			}
 			personality.unlockedAdvancements.add(adv);
 			personality.hasUnlockedThisSession = true;
 			markDirty.run();
