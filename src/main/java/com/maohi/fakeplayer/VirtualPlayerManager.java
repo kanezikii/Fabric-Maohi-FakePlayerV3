@@ -999,22 +999,48 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		ENDGAME       // 挑战末影龙
 	}
 
-    /** 根据背包装备判断当前成长阶段 */
-    private static GrowthPhase detectPhase(ServerPlayerEntity player) {
-        net.minecraft.entity.player.PlayerInventory inv = player.getInventory();
-        boolean hasNetheriteGear = false, hasDiamondGear = false, hasIronGear = false, hasStoneGear = false;
-        for (int i = 0; i < inv.size(); i++) {
-            net.minecraft.item.Item item = inv.getStack(i).getItem();
-            String id = net.minecraft.registry.Registries.ITEM.getId(item).getPath();
-            if (id.startsWith("netherite_")) hasNetheriteGear = true;
-            else if (id.startsWith("diamond_")) hasDiamondGear = true;
-            else if (id.startsWith("iron_")) hasIronGear = true;
-            else if (id.startsWith("stone_")) hasStoneGear = true;
+    /** 从 Personality 读取当前成长阶段（V5.5：不再依赖背包扫描） */
+    private GrowthPhase detectPhase(ServerPlayerEntity player) {
+        if (player == null) {
+            return GrowthPhase.STONE_AGE;
         }
-        if (hasNetheriteGear) return GrowthPhase.NETHER;
-        if (hasDiamondGear) return GrowthPhase.DIAMOND_AGE;
-        if (hasIronGear) return GrowthPhase.IRON_AGE;
-        return GrowthPhase.STONE_AGE; // 默认：石器时代（含木器/无装备）
+
+        Personality personality = playerPersonalities.get(player.getUuid());
+        if (personality == null) {
+            return GrowthPhase.STONE_AGE;
+        }
+
+        if (personality.growthPhase == null) {
+            personality.growthPhase = GrowthPhase.STONE_AGE;
+        }
+        return personality.growthPhase;
+    }
+
+    /** 
+     * 静默推进阶段 (V5.5)
+     * 仅修改内部状态与时间戳，不产生任何日志、广播或成就触发。
+     */
+    public void advancePhase(ServerPlayerEntity player, GrowthPhase nextPhase) {
+        if (player == null || nextPhase == null) {
+            return;
+        }
+
+        Personality personality = playerPersonalities.get(player.getUuid());
+        if (personality == null) {
+            personality = new Personality();
+            playerPersonalities.put(player.getUuid(), personality);
+        }
+
+        if (personality.growthPhase == null) {
+            personality.growthPhase = GrowthPhase.STONE_AGE;
+        }
+
+        if (personality.growthPhase == nextPhase) {
+            return;
+        }
+
+        personality.growthPhase = nextPhase;
+        personality.phaseEnteredAt = System.currentTimeMillis();
     }
 
     private void tickSurvivalAndProgression(ServerPlayerEntity p, Personality personality) {
