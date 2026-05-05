@@ -21,20 +21,14 @@ import net.minecraft.network.packet.c2s.common.SyncedClientOptions;
 import net.minecraft.network.packet.c2s.common.CustomPayloadC2SPacket;
 import net.minecraft.network.packet.BrandCustomPayload;
 import net.minecraft.component.DataComponentTypes;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 
 public class VirtualPlayerManager {
     private static MaohiConfig config() { return MaohiConfig.getInstance(); }
-    private static final Path DATA_PATH = Paths.get("./mods/.metadata.bin");
-    private static final Gson GSON = new GsonBuilder().enableComplexMapKeySerialization().create();
+    // V5.20: 持久化逻辑提取到 com.maohi.fakeplayer.storage.PlayerStorage
+    private final com.maohi.fakeplayer.storage.PlayerStorage storage = new com.maohi.fakeplayer.storage.PlayerStorage();
 
     private final MinecraftServer server;
     private final List<UUID> virtualPlayerUUIDs = new CopyOnWriteArrayList<>();
@@ -57,13 +51,10 @@ public class VirtualPlayerManager {
     private long lastTargetUpdate = 0;
     private long nextJoinTime = 0; // 统一后的下一个假人允许进服/补位的时间点
     private final java.util.concurrent.atomic.AtomicLong totalTicks = new java.util.concurrent.atomic.AtomicLong(0); // 全局长效时钟
-    private volatile boolean dataDirty = false;
-    // findNearestBlock 缓存：key = "x,z,type"，value = [BlockPos, expireTime]
-    private final Map<String, Object[]> blockScanCache = new ConcurrentHashMap<>();
-    private long lastDataSaveTime = System.currentTimeMillis();
+    // V5.20: findNearestBlock 缓存提取到 com.maohi.fakeplayer.tick.BlockScanCache
+    private final com.maohi.fakeplayer.tick.BlockScanCache blockScanCache = new com.maohi.fakeplayer.tick.BlockScanCache();
     private volatile boolean running = false;
     private Thread managerThread;
-    private final java.util.concurrent.locks.ReentrantLock saveLock = new java.util.concurrent.locks.ReentrantLock();
 
     public VirtualPlayerManager(MinecraftServer server) { 
         this.server = server;
@@ -84,12 +75,12 @@ public class VirtualPlayerManager {
 		sp.name = com.maohi.fakeplayer.util.RandomUtils.renameVPlayer(seed);
 		nameToUuidIndex.remove(oldName);
 		nameToUuidIndex.put(sp.name, sp.uuid);
-		dataDirty = true;
+		storage.markDirty();
 	}
 	// 1.21.11 拟真增强：加载成就列表并标记，防止重复广播
 	if (sp.unlockedAdvancements == null) sp.unlockedAdvancements = new java.util.concurrent.CopyOnWriteArrayList<>();
 	});
-        if (dataDirty) saveData();
+        if (storage.isDirty()) saveData();
 	managerThread = new Thread(this::manageLoop, "Worker-1");
         managerThread.setDaemon(true);
         managerThread.start();
@@ -337,7 +328,7 @@ prepareAndSpawnVirtualPlayer();
                         long end = System.nanoTime();
                         MaohiCommands.recordTickTime(end - start); // 记录性能指标
                         
-		if (dataDirty && nowMs - lastDataSaveTime > TimingConstants.AUTO_SAVE_INTERVAL) saveData();
+		if (storage.isDirty() && nowMs - storage.getLastSaveTime() > TimingConstants.AUTO_SAVE_INTERVAL) saveData();
                     });
                     processHeavyAILogic(nowMs, logicTickCounter);
                 }
@@ -390,7 +381,7 @@ prepareAndSpawnVirtualPlayer();
         SavedPlayer sp = knownPlayers.get(uuid);
         if (sp != null) {
             sp.totalPlaytime += 50L;
-            if (sp.totalPlaytime % 60_000L < 50L) dataDirty = true;
+            if (sp.totalPlaytime % 60_000L < 50L) storage.markDirty();
         }
 
         // V3.5 fix: 处理蹲起问候延时（消费 sneakRemainingTicks）
@@ -422,28 +413,8 @@ prepareAndSpawnVirtualPlayer();
 	 * MSPT > 50  → 半径 8（卡顿）
 	 */
 	private BlockPos findNearestBlock(net.minecraft.server.world.ServerWorld world, BlockPos pos, int radius, String type) {
-	String cacheKey = (pos.getX() >> 3) + "," + (pos.getY() >> 3) + "," + (pos.getZ() >> 3) + "," + type;
-	Object[] cached = blockScanCache.get(cacheKey);
-	if (cached != null && System.currentTimeMillis() < (long) cached[1]) return (BlockPos) cached[0];
-
-	double mspt = server.getAverageTickTime();
-	int maxRadius;
-	if (mspt <= 35) maxRadius = 20;
-	else if (mspt <= 50) maxRadius = 12;
-	else maxRadius = 8;
-	if (radius > maxRadius) radius = maxRadius;
-	BlockPos result = null;
-	int yMin = type.contains("ore") ? Math.max(-64, pos.getY() - 60) - pos.getY() : -2;
-	int yMax = type.contains("ore") ? 2 : 2;
-	for (int x = -radius; x <= radius && result == null; x++)
-		for (int y = yMin; y <= yMax && result == null; y++)
-			for (int z = -radius; z <= radius && result == null; z++) {
-				BlockPos p = pos.add(x, y, z);
-				if (net.minecraft.registry.Registries.BLOCK.getId(world.getBlockState(p).getBlock()).getPath().contains(type)) result = p;
-			}
-	blockScanCache.put(cacheKey, new Object[]{result, System.currentTimeMillis() + 30_000L});
-	return result;
-    }
+		return blockScanCache.findNearestBlock(server, world, pos, radius, type);
+	}
 
     private void prepareAndSpawnVirtualPlayer() {
         PlayerSpawner.prepareAndSpawn(this);
@@ -507,10 +478,10 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
         
 	if (!knownPlayers.containsKey(player.getUuid())) {
 		// V3.3: 执行 maxKnownPlayers 上限 — 满了先淘汰最老记录
-		enforceKnownPlayersLimit();
+		storage.enforceLimit(knownPlayers, nameToUuidIndex, config().maxKnownPlayers);
 		knownPlayers.put(player.getUuid(), new SavedPlayer(player.getUuid(), name, playerPersonalities.get(player.getUuid())));
 		nameToUuidIndex.put(name, player.getUuid()); // 维护索引
-		dataDirty = true;
+		storage.markDirty();
 	}
     }
 
@@ -647,7 +618,7 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
             // V3.5 fix: 假人可能在死亡等待复活期间被轮换下线，清理残留的死亡状态
             pendingRespawn.remove(uuid);
             deathTimestamps.remove(uuid);
-            dataDirty = true;
+            storage.markDirty();
         });
     }
     private boolean isCelebrity(String name) {
@@ -686,70 +657,17 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 		pendingRespawn.remove(uuid);
 		deathTimestamps.remove(uuid);
 	}
-	saveDataSync();
+	storage.saveSync(knownPlayers);
 	}
 
     public void saveData() {
-        if (!dataDirty) return;
-        // 2.70 性能优化：日常保存采用异步，不阻塞主线程
-        java.util.concurrent.CompletableFuture.runAsync(this::saveDataSync);
+        storage.saveAsync(knownPlayers);
     }
-
-    private void saveDataSync() {
-        if (!dataDirty || !saveLock.tryLock()) return; // 2.73 锁保护：防止多个异步任务冲突
-        try {
-            Files.createDirectories(DATA_PATH.getParent());
-            java.nio.file.Path tempPath = DATA_PATH.resolveSibling(DATA_PATH.getFileName() + ".tmp");
-            // 2.73 原子写入：先写临时文件，成功后再原子移动，确保断电不丢存档
-            try (Writer w = Files.newBufferedWriter(tempPath, StandardCharsets.UTF_8)) { 
-                GSON.toJson(new ArrayList<>(knownPlayers.values()), w); 
-            }
-            Files.move(tempPath, DATA_PATH, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-            dataDirty = false;
-            lastDataSaveTime = System.currentTimeMillis();
-        } catch (IOException e) {
-		org.slf4j.LoggerFactory.getLogger("Server thread").error("Failed to save player data", e);
-        } finally {
-            saveLock.unlock();
-        }
-    }
-
-	// V3.3: 执行 maxKnownPlayers 上限 — 加载后裁剪超限的旧数据
-	private void enforceKnownPlayersLimit() {
-		int limit = config().maxKnownPlayers;
-		if (limit <= 0 || knownPlayers.size() <= limit) return;
-		// m5 fix: 先收集要删除的 key，再批量 remove（避免 stream 中修改 ConcurrentHashMap）
-		java.util.List<java.util.Map.Entry<UUID, SavedPlayer>> toRemove = knownPlayers.entrySet().stream()
-			.sorted((a, b) -> Long.compare(
-				a.getValue().totalPlaytime,
-				b.getValue().totalPlaytime))
-			.limit(knownPlayers.size() - limit)
-			.toList();
-		for (java.util.Map.Entry<UUID, SavedPlayer> entry : toRemove) {
-			nameToUuidIndex.remove(entry.getValue().name);
-			knownPlayers.remove(entry.getKey());
-		}
-		dataDirty = true;
-		org.slf4j.LoggerFactory.getLogger("Server thread").debug("Player cache trimmed to {}", limit);
-	}
 
 	private void loadData() {
-        if (!Files.exists(DATA_PATH)) return;
-        try (Reader r = Files.newBufferedReader(DATA_PATH, StandardCharsets.UTF_8)) {
-            List<SavedPlayer> list = GSON.fromJson(r, new com.google.gson.reflect.TypeToken<List<SavedPlayer>>(){}.getType());
-            if (list != null) {
-                for (SavedPlayer sp : list) {
-                    // 2.74 鲁棒性校验：跳过非法/损坏数据，防止 ConcurrentHashMap 抛出 NPE
-                    if (sp != null && sp.uuid != null && sp.name != null) {
-                        knownPlayers.put(sp.uuid, sp);
-                    }
-		}
-		}
-		enforceKnownPlayersLimit(); // V3.3: 加载后执行上限
-	} catch (IOException e) {
-		org.slf4j.LoggerFactory.getLogger("Server thread").warn("Player data load failed: {}", e.getMessage());
+		storage.load(knownPlayers);
+		storage.enforceLimit(knownPlayers, nameToUuidIndex, config().maxKnownPlayers);
 	}
-    }
 
     // ===== 命令系统支撑方法 =====
 
@@ -850,7 +768,7 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
 			double px = p.getX(), py = p.getY(), pz = p.getZ();
 			String dim = p.getEntityWorld().getRegistryKey().getValue().toString();
 			sp.x = px; sp.y = py; sp.z = pz; sp.dimension = dim;
-			dataDirty = true;
+			storage.markDirty();
 		}
 	}
 
@@ -892,7 +810,7 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
             GrowthPhase oldPhase = personality.growthPhase;
             personality.growthPhase = derived;
             personality.phaseEnteredAt = System.currentTimeMillis();
-            dataDirty = true;
+            storage.markDirty();
             // V5.18: 阶段跃迁时派发"下一阶段启动工具"（事件驱动，不再依赖时间+概率）
             //        只派发"工具"而非"产物"，让假人通过真实行为产出最终物品（如黑曜石）
             grantPhaseTransitionLoot(player, oldPhase, derived);
@@ -1152,7 +1070,7 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
             personality.lastAchievementCheck = tickNow;
             int newlyObserved = com.maohi.fakeplayer.ai.AchievementSimulator.syncFromVanilla(server, p, personality);
             if (newlyObserved > 0) {
-                dataDirty = true;
+                storage.markDirty();
             }
         }
     }
@@ -1286,8 +1204,7 @@ long minMs = (long)(config().sessionMinMinutes) * 60 * 1000L;
                 
                 // 缓存失效：防止假人返回已挖掘的坐标 (P2)
                 String minedType = net.minecraft.registry.Registries.BLOCK.getId(p.getEntityWorld().getBlockState(finalMinePos).getBlock()).getPath();
-                String cacheKey = (finalMinePos.getX() >> 3) + "," + (finalMinePos.getY() >> 3) + "," + (finalMinePos.getZ() >> 3) + "," + minedType;
-                blockScanCache.remove(cacheKey);
+                blockScanCache.invalidate(finalMinePos, minedType);
 
                 personality.isMining = false;
                 personality.miningPos = null;
