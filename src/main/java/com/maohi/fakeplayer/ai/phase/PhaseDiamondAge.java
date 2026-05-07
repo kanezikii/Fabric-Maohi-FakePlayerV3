@@ -115,10 +115,15 @@ public final class PhaseDiamondAge implements Phase {
             set(personality, TaskType.MINING, target, TimingConstants.TASK_TIMEOUT_WORK);
 
         } else if (roll < 45) {
-            // 砍木 — 工具/材料补给
+            // 砍木 — 工具/材料补给。找不到树 → 不要假装 WOODCUTTING 走到一片没树的地表点,
+            // 直接 EXPLORING 去远处找,下次 assignTask 会重新扫。
             BlockPos target = ctx.findLog.apply(world, player.getBlockPos());
-            if (target == null) target = surfacePoint(world, player, 60);
-            set(personality, TaskType.WOODCUTTING, target, TimingConstants.TASK_TIMEOUT_WORK);
+            if (target != null) {
+                set(personality, TaskType.WOODCUTTING, target, TimingConstants.TASK_TIMEOUT_WORK);
+            } else {
+                set(personality, TaskType.EXPLORING, surfacePoint(world, player, 80),
+                    TimingConstants.TASK_TIMEOUT_EXPLORE);
+            }
 
         } else if (roll < 70) {
             // HUNTING (高价值野怪)

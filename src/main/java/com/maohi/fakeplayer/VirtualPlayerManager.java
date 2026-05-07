@@ -222,6 +222,11 @@ public class VirtualPlayerManager {
                                     if (!path.isEmpty()) {
                                         personality.taskTarget = path.get(0);
                                     } else {
+                                        // V5.30 真正的死路:计一次失败,留给 reassign chokepoint 兜底
+                                        com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
+                                            "reason", "blocked_no_path", "task", personality.currentTask,
+                                            "target", snapshotTarget);
+                                        Personality.recordTaskFailure(personality, snapshotTarget);
                                         personality.currentTask = TaskType.IDLE;
                                         personality.taskTarget = null;
                                     }
@@ -422,6 +427,20 @@ prepareAndSpawnVirtualPlayer();
         //   PCAP 抓到一次"凭空 Y 坐标跳变"就足够暴露假人身份。
         //   风险: 假人卡死率上升,但这是行为真实的代价,优先级压倒可玩性。
         //   备选(若卡死率不可接受): 高空 30 秒后走 startLogoutProcess 重生,vanilla 真人也是这样。
+
+        // V5.29 G.4: 高空自由落体兜底——胆小者下线
+        //   触发条件:主世界 + fallDistance > 30 + 仍在下落(velocity.y < -0.5) + 未在登出流程中。
+        //   30 格 fall = 27 点伤害(满血玩家不戴鞋必死),vanilla 真人此时通常断网保命/吓掉线;
+        //   bot 摔死会掉光装备 + 等级,严重污染统计指纹(假人异常死亡率高)。
+        //   走 startLogoutProcess = 真实 disconnect 包,vanilla 自动 savePlayerData,下线点保留。
+        if (personality != null && !isLoggingOut(uuid)
+            && p.getEntityWorld().getRegistryKey() == net.minecraft.world.World.OVERWORLD
+            && p.fallDistance > 30f
+            && !p.isOnGround()
+            && p.getVelocity().y < -0.5) {
+            startLogoutProcessInternal(uuid);
+            return;
+        }
     }
 
     // --- Getters & Helpers for SocialEngine & Spawner ---
@@ -446,7 +465,8 @@ prepareAndSpawnVirtualPlayer();
     /** 寻找等级匹配的猎杀目标：低级打被动怪，高级打敌对怪 */
     private net.minecraft.entity.mob.HostileEntity findHuntTarget(ServerPlayerEntity player) {
         int xp = player.experienceLevel;
-        net.minecraft.util.math.Box box = player.getBoundingBox().expand(24.0);
+        // V5.28.6 P2-Scan: 动物/敌对怪扫描半径 24 → 20,与统一 scan radii 一致
+        net.minecraft.util.math.Box box = player.getBoundingBox().expand(20.0);
         List<net.minecraft.entity.mob.HostileEntity> mobs = player.getEntityWorld()
             .getEntitiesByClass(net.minecraft.entity.mob.HostileEntity.class, box,
                 e -> e.isAlive() && !e.isInvisible() && isMobMatchLevel(e, xp));
@@ -472,6 +492,8 @@ prepareAndSpawnVirtualPlayer();
 
         virtualPlayerUUIDs.add(player.getUuid());
         virtualPlayerNames.put(player.getUuid(), name);
+        com.maohi.fakeplayer.TaskLogger.logRaw(name, "spawn",
+            "uuid", player.getUuid(), "saved", (saved != null && saved.personality != null));
         // 恢复记忆：如果是老玩家回归，加载其保存的个性与成就记录
 	Personality pState = (saved != null && saved.personality != null) ? saved.personality : new Personality();
 	
@@ -777,18 +799,52 @@ prepareAndSpawnVirtualPlayer();
         GrowthPhase.ENDGAME,      com.maohi.fakeplayer.ai.phase.PhaseEnderDragon.INSTANCE
     );
 
+    /**
+     * V5.30 任务失败计数兜底:连续 ≥4 次失败时调用,把假人甩到 ±60 格外的 EXPLORING 目标,
+     * 切断"反复撞同一棵够不到的树/挖同一块够不到的石头"的卡死循环。
+     * 朝当前 yaw ±60° 扇形采样,贴合 PhaseStoneAge.setExplore 的"定向跋涉"观感,而不是回头跑。
+     * 30s 过期 → 期间假人走过去,再触发一次正常 assignRandomTask 重新扫资源,大概率新区域找得到。
+     */
+    private void forceExploreAfterFailures(ServerPlayerEntity p, Personality personality) {
+        ThreadLocalRandom rng = ThreadLocalRandom.current();
+        float yaw = p.getYaw() + (rng.nextFloat() * 120f - 60f);
+        double rad = Math.toRadians(yaw);
+        double dist = 50.0 + rng.nextDouble() * 20.0;  // 50~70 格
+        int dx = (int) Math.round(-Math.sin(rad) * dist);
+        int dz = (int) Math.round(Math.cos(rad) * dist);
+        personality.currentTask = TaskType.EXPLORING;
+        personality.taskTarget = p.getBlockPos().add(dx, 0, dz);
+        personality.taskExpireTime = System.currentTimeMillis() + 30_000L;
+        com.maohi.fakeplayer.TaskLogger.log(p, "force_explore",
+            "target", personality.taskTarget, "lastFail", personality.lastFailedTarget);
+        Personality.resetTaskFailCount(personality);
+    }
+
     private void assignRandomTask(ServerPlayerEntity player, Personality personality) {
         GrowthPhase phase = detectPhase(player);
+        // V5.30 调试:阶段切换时打一次日志,稳态 tick 不重复
+        if (com.maohi.fakeplayer.TaskLogger.enabled() && phase != personality.lastLoggedPhase) {
+            com.maohi.fakeplayer.TaskLogger.log(player, "phase_change",
+                "from", personality.lastLoggedPhase, "to", phase);
+            personality.lastLoggedPhase = phase;
+        }
         com.maohi.fakeplayer.ai.phase.Phase impl = PHASE_REGISTRY.get(phase);
         if (impl == null) return;
+        // V5.28.6 P2-Scan: 统一调整 scan 半径 — 树/补木头 32, 石头 24, 铁矿 24, 动物 20
+        //   原值树/铁矿 20、石头 12 太短,假人在中等密度地形里大概率扫不到 → 站原地反复重扫;
+        //   新值与"探索 40 格"配合:近 32 格扫不到就 EXPLORING 40 格走出去,移动后再扫一次。
         com.maohi.fakeplayer.ai.phase.PhaseContext ctx = new com.maohi.fakeplayer.ai.phase.PhaseContext(
-            (world, pos) -> findNearestBlock(world, pos, 20, "ore"),
-            (world, pos) -> findNearestBlock(world, pos, 20, "log"),
+            (world, pos) -> findNearestBlock(world, pos, 24, "ore"),
+            (world, pos) -> findNearestBlock(world, pos, 32, "log"),
             () -> findHuntTarget(player),
             // V5.22: PhaseStoneAge 用,优先找真石头方块,关键基础成就 mine_stone 触发
-            (world, pos) -> findNearestBlock(world, pos, 12, "stone")
+            (world, pos) -> findNearestBlock(world, pos, 24, "stone")
         );
         impl.assignTask(player, personality, ctx);
+        // V5.30 调试:assign 后立刻报这次决策选了什么任务/目标
+        com.maohi.fakeplayer.TaskLogger.log(player, "assign",
+            "phase", phase, "task", personality.currentTask, "target", personality.taskTarget,
+            "fails", personality.taskFailCount);
     }
 
 
@@ -1065,7 +1121,21 @@ prepareAndSpawnVirtualPlayer();
 
         // ★ 任务分配与队列跳转
         if (totalTicks.get() % 100 == 0 && (personality.currentTask == TaskType.IDLE || System.currentTimeMillis() > personality.taskExpireTime)) {
-            if (!personality.taskQueue.isEmpty()) {
+            // V5.30 任务失败计数:任务过期但仍非 IDLE → 算一次未完成失败
+            //   (IDLE 进入分支是正常 idle→reassign,不计失败)
+            if (personality.currentTask != TaskType.IDLE
+                && personality.taskTarget != null
+                && System.currentTimeMillis() > personality.taskExpireTime) {
+                com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
+                    "reason", "expired", "task", personality.currentTask,
+                    "target", personality.taskTarget, "fails", personality.taskFailCount + 1);
+                Personality.recordTaskFailure(personality, personality.taskTarget);
+            }
+            // V5.30 阈值兜底:连续 ≥4 次失败 → 强制远征到 ±60 格,清零计数,跳过正常 queue/random
+            //   避免"反复挖一块够不到的石头"或"反复撞同一棵树"卡死
+            if (personality.taskFailCount >= 4) {
+                forceExploreAfterFailures(p, personality);
+            } else if (!personality.taskQueue.isEmpty()) {
                 Personality.TaskEntry next = personality.taskQueue.poll();
                 personality.currentTask = next.type;
                 personality.taskTarget = next.target;
@@ -1162,6 +1232,9 @@ prepareAndSpawnVirtualPlayer();
     private void tickWorldInteraction(ServerPlayerEntity p, Personality personality, int logicTickCounter, boolean skipLowPriority) {
         // P1-1 地下照明
         com.maohi.fakeplayer.ai.BlockPlacer.tryPlaceTorch(p, personality);
+
+        // V5.30 W2S 工作台落地:背包合成出 crafting_table 后,真人会找空地放下来再继续合 stick/木镐
+        com.maohi.fakeplayer.ai.BlockPlacer.tryPlaceCraftingTable(p, personality);
         
         // P1-2 PVP 演戏切磋
         com.maohi.fakeplayer.ai.PvpSparring.tickSparring(p, personality, totalTicks.get());
@@ -1207,6 +1280,8 @@ prepareAndSpawnVirtualPlayer();
                 handleHuntingTask(p, personality);
             } else {
                 if (dist <= 4.0 && ThreadLocalRandom.current().nextInt(100) < 20) {
+                    // V5.30 EXPLORE/其它任务抵达 4 格以内 → 算成功,清失败计数
+                    Personality.resetTaskFailCount(personality);
                     personality.taskTarget = null;
                 }
             }
@@ -1247,6 +1322,11 @@ prepareAndSpawnVirtualPlayer();
             if (!path.isEmpty()) {
                 personality.taskTarget = path.get(0);
             } else {
+                // V5.30 真正的死路:既被阻挡,A* 也找不到路 → 计一次失败
+                com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
+                    "reason", "blocked_no_path", "task", personality.currentTask,
+                    "target", personality.taskTarget);
+                Personality.recordTaskFailure(personality, personality.taskTarget);
                 personality.currentTask = TaskType.IDLE;
                 personality.taskTarget = null;
             }
@@ -1258,17 +1338,36 @@ prepareAndSpawnVirtualPlayer();
             BlockPos mineTarget = com.maohi.fakeplayer.ai.ActionSimulator.maybeMistakeDig(personality.taskTarget);
             net.minecraft.util.math.Direction mineDir = getDirectionFromYaw(p.getYaw());
 
+            net.minecraft.block.BlockState targetState = p.getEntityWorld().getBlockState(mineTarget);
+
+            // V5.30 目标已变空气(树被砍/方块被别人挖走/原本就是 phantom 目标)→ 计失败 + 放弃,
+            //   不让 mining 状态机走"硬度 0 → 1 tick 完成 → blocksMinedTotal++"的伪成功路径。
+            if (targetState.isAir()) {
+                com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
+                    "reason", "target_is_air", "task", personality.currentTask, "target", mineTarget);
+                Personality.recordTaskFailure(personality, mineTarget);
+                personality.currentTask = TaskType.IDLE;
+                personality.taskTarget = null;
+                return;
+            }
+
             personality.miningPos = mineTarget;
             personality.miningDirection = mineDir;
             personality.isMining = true;
             personality.miningElapsedTicks = 0;
 
-            net.minecraft.block.BlockState targetState = p.getEntityWorld().getBlockState(mineTarget);
             float hardness = targetState.getHardness(p.getEntityWorld(), mineTarget);
             float breakSpeed = p.getBlockBreakingSpeed(targetState);
-            breakSpeed *= (float) personality.miningSkill;
             if (breakSpeed <= 1.0f) breakSpeed = 1.0f;
 
+            // V5.30 时序对齐 vanilla:删掉 `breakSpeed *= miningSkill` 这行 —
+            //   服务端 vanilla 没 miningSkill 概念,按真实 BlockBreakingSpeed 算 progress。
+            //   bot 之前乘 miningSkill(1.0~1.5)会让 STOP 比服务端期望提前最多 38%,
+            //   触发 vanilla failedToMine 慢路:服务端继续累 tick,~7 tick 后才真正 tryBreakBlock。
+            //   期间 bot 已经走到下一目标,drops 留在原位等过期。
+            //   现在严格按 vanilla 时长 + random(0..2) 兜底,STOP 必落在 progress >= 0.7 区间,
+            //   走快路 tryBreakBlock,drops 当 tick 落地,bot 当场拾取。
+            //   miningSkill 字段保留(其它地方可能引用),只是不再参与 timing。
             personality.miningTotalTicks = Math.max(1, (int) Math.ceil(hardness * 20.0f / breakSpeed)) + ThreadLocalRandom.current().nextInt(3);
 
             // V5.24 P2-1: 工具不匹配/方块不可破坏时直接放弃,避免徒手挖黑曜石 50 秒静止。
@@ -1278,6 +1377,11 @@ prepareAndSpawnVirtualPlayer();
                 personality.isMining = false;
                 personality.miningPos = null;
                 personality.miningElapsedTicks = 0;
+                // V5.30 工具不匹配 → 计失败,反复对同一硬目标会触发强制远征
+                com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
+                    "reason", "tool_mismatch", "task", personality.currentTask,
+                    "target", mineTarget, "hardness", hardness, "ticks", personality.miningTotalTicks);
+                Personality.recordTaskFailure(personality, mineTarget);
                 personality.currentTask = TaskType.IDLE;
                 personality.taskTarget = null;
                 return;
@@ -1287,6 +1391,11 @@ prepareAndSpawnVirtualPlayer();
                 com.maohi.fakeplayer.network.PacketHelper.startDestroyBlock(p, personality.miningPos, personality.miningDirection);
                 com.maohi.fakeplayer.ai.EquipmentBehavior.autoSwitchTool(p, personality.currentTask);
             });
+            // V5.30 调试:开挖记一笔(目标 + 预计 ticks)
+            com.maohi.fakeplayer.TaskLogger.log(p, "mine_start",
+                "target", mineTarget, "block",
+                net.minecraft.registry.Registries.BLOCK.getId(targetState.getBlock()).getPath(),
+                "ticks", personality.miningTotalTicks);
         } else {
             personality.miningElapsedTicks++;
             if (personality.miningElapsedTicks % 4 == 0) {
@@ -1297,15 +1406,22 @@ prepareAndSpawnVirtualPlayer();
                 BlockPos finalMinePos = personality.miningPos;
                 net.minecraft.util.math.Direction finalMineDir = personality.miningDirection;
                 server.execute(() -> com.maohi.fakeplayer.network.PacketHelper.finishDestroyBlock(p, finalMinePos, finalMineDir));
-                
+
                 // 缓存失效：防止假人返回已挖掘的坐标 (P2)
                 String minedType = net.minecraft.registry.Registries.BLOCK.getId(p.getEntityWorld().getBlockState(finalMinePos).getBlock()).getPath();
                 blockScanCache.invalidate(finalMinePos, minedType);
+
+                // V5.30 调试:挖断记一笔(注意 minedType 取自 finishDestroy 之后的 state,通常是 air)
+                com.maohi.fakeplayer.TaskLogger.log(p, "mine_done",
+                    "target", finalMinePos, "remainingBlock", minedType,
+                    "totalMined", personality.blocksMinedTotal + 1);
 
                 personality.isMining = false;
                 personality.miningPos = null;
                 personality.miningElapsedTicks = 0;
                 personality.blocksMinedTotal++;
+                // V5.30 真实挖断方块 → 失败计数清零(久远失败不该阻塞正常作业流)
+                Personality.resetTaskFailCount(personality);
                 if (personality.miningSkill < 1.5) personality.miningSkill += 0.001;
 
                 if (personality.currentTask == TaskType.MINING) {
@@ -1329,6 +1445,9 @@ prepareAndSpawnVirtualPlayer();
     private void handleHuntingTask(ServerPlayerEntity p, Personality personality) {
         net.minecraft.entity.Entity huntTarget = personality.huntTargetUuid != null ? p.getEntityWorld().getEntity(personality.huntTargetUuid) : null;
         if (huntTarget == null || !huntTarget.isAlive()) {
+            // V5.30 目标确认死亡或丢失 → 大概率击杀成功,清失败计数
+            //   (目标走出加载范围/despawn 也走这条路径,误清概率小,值得换走"杀完一个怪应该重置计数"的语义)
+            Personality.resetTaskFailCount(personality);
             personality.currentTask = TaskType.IDLE;
             personality.taskTarget = null;
             personality.huntTargetUuid = null;

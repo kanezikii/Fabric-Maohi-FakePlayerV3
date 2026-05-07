@@ -77,12 +77,18 @@ public final class SmeltingBehavior {
 		if (player.squaredDistanceTo(Vec3d.ofCenter(furnace)) > COLLECT_DIST_SQ) return;
 
 		// 真协议化阶段 1: 开熔炉 → 摆 1 raw_iron + 1 fuel → 关
-		if (!placeIngredientsInFurnace(player, furnace, rawIronSlot, fuelSlot)) return;
+		if (!placeIngredientsInFurnace(player, furnace, rawIronSlot, fuelSlot)) {
+			com.maohi.fakeplayer.TaskLogger.log(player, "smelt_fail",
+				"reason", "place_ingredients_failed", "furnace", furnace);
+			return;
+		}
 
 		// 标记阶段 2 状态
 		pers.smeltingFurnacePos = furnace;
 		// vanilla 烧炼周期 200 tick;给点抖动避免与多假人同步
 		pers.smeltingTicks = 200 + ThreadLocalRandom.current().nextInt(40);
+		com.maohi.fakeplayer.TaskLogger.log(player, "smelt_start",
+			"furnace", furnace, "ticks", pers.smeltingTicks);
 	}
 
 	/**
@@ -96,11 +102,23 @@ public final class SmeltingBehavior {
 			BlockPos furnace = pers.smeltingFurnacePos;
 			pers.smeltingFurnacePos = null; // 不论成败都清状态,避免卡死
 
-			if (furnace == null) return;
+			if (furnace == null) {
+				com.maohi.fakeplayer.TaskLogger.log(player, "smelt_fail",
+					"reason", "furnace_pos_lost");
+				return;
+			}
 			// 假人可能在 200 tick 期间走远了,放弃 collect(产物留在熔炉里,下次再说)
-			if (player.squaredDistanceTo(Vec3d.ofCenter(furnace)) > COLLECT_DIST_SQ) return;
+			if (player.squaredDistanceTo(Vec3d.ofCenter(furnace)) > COLLECT_DIST_SQ) {
+				com.maohi.fakeplayer.TaskLogger.log(player, "smelt_fail",
+					"reason", "walked_away", "furnace", furnace);
+				return;
+			}
 			// 熔炉可能被破坏
-			if (!isFurnaceBlock(player.getEntityWorld(), furnace)) return;
+			if (!isFurnaceBlock(player.getEntityWorld(), furnace)) {
+				com.maohi.fakeplayer.TaskLogger.log(player, "smelt_fail",
+					"reason", "furnace_destroyed", "furnace", furnace);
+				return;
+			}
 
 			collectFromFurnace(player, furnace);
 		}
@@ -152,6 +170,8 @@ public final class SmeltingBehavior {
 			if (player.currentScreenHandler != player.playerScreenHandler) {
 				InventoryActionHelper.closeScreen(player);
 			}
+			com.maohi.fakeplayer.TaskLogger.log(player, "smelt_fail",
+				"reason", "screen_not_opened", "furnace", furnace);
 			return;
 		}
 
@@ -165,6 +185,8 @@ public final class SmeltingBehavior {
 		player.getEntityWorld().playSound(null, player.getX(), player.getY(), player.getZ(),
 			net.minecraft.sound.SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP,
 			net.minecraft.sound.SoundCategory.PLAYERS, 0.5f, 0.8f);
+
+		com.maohi.fakeplayer.TaskLogger.log(player, "smelt_done", "furnace", furnace);
 	}
 
 	// ---- internal: 工具方法 ----

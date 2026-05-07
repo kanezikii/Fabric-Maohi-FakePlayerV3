@@ -2,6 +2,7 @@ package com.maohi.fakeplayer;
 
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 
 /**
  * 假人个性 / 状态聚合(单玩家全部运行时状态)
@@ -69,6 +70,16 @@ public class Personality {
 
 	public float actionMultiplier = com.maohi.fakeplayer.ai.BehavioralDistributionValidator.getAlignedActionMultiplier();
 	public TaskType currentTask = TaskType.IDLE; public BlockPos taskTarget = null; public long taskExpireTime = 0;
+
+	// V5.30 任务失败计数:同一/相邻目标连续失败 → 阈值后强制远征,避免反复撞同一棵够不到的树。
+	// recordTaskFailure 在以下场景调用:任务过期未完成、寻路死路、工具无法破坏目标、挖掘目标变空气。
+	// resetTaskFailCount 在真实成功时调用:实际挖断方块、抵达 EXPLORE 目标、HUNTING 目标确认死亡。
+	public int taskFailCount = 0;
+	public BlockPos lastFailedTarget = null;
+	public long lastTaskFailTime = 0L;
+
+	// V5.30 调试日志:记录上次 detectPhase 输出,用于在切换时打 phase_change 日志(避免每 tick 重复)
+	public GrowthPhase lastLoggedPhase = null;
 	public boolean isEating = false; public int eatingTicks = 0;
 	// V3.3 全链路真实：挖掘状态机（多 tick 持续挖掘）
 	public boolean isMining = false;          // 是否正在挖掘
@@ -189,6 +200,19 @@ public class Personality {
 	public long torchPlaceAtTick = 0L;
 	public long torchRestoreAtTick = 0L;
 
+	// V5.30 W2S 工作台落地状态机(同 torch 节奏:切槽→等→放置→等→切回)。
+	// 触发条件:背包里有 crafting_table、周围 6 格无工作台、当前任务空闲或采集中、
+	//          screenHandler 是 PlayerScreenHandler(没在合成/熔炉/箱子)。
+	// stage 1 时如果 PlaceBlockPos 已被占用或槽位空,放弃并 reset。
+	public int tablePlaceStage = 0;
+	public int tableOriginalSlot = 0;
+	public int tableTargetSlot = 0;
+	public BlockPos tablePlaceBlockPos = null;
+	public Direction tablePlaceFaceDir = null;
+	public BlockPos tablePlaceSupportPos = null;
+	public long tablePlaceAtTick = 0L;
+	public long tableRestoreAtTick = 0L;
+
 	// V5.23 聊天近期去重:VocabularyBank 选词时拒绝最近 5 条已说过的台词,
 	// 避免假人短时间内重复说同一句"rain rain go away"等。
 	// 用 ArrayDeque 当固定容量 FIFO 队列。
@@ -207,4 +231,21 @@ public class Personality {
 	public final long triggerPhaseSeed = java.util.concurrent.ThreadLocalRandom.current().nextLong();
 	// trigger 类别 → 下次允许执行的时间戳(毫秒);TriggerRegistry 维护
 	public java.util.Map<String, Long> nextTriggerCheckAt = new java.util.concurrent.ConcurrentHashMap<>();
+
+	// V5.30 任务失败计数助手:用法见类头 taskFailCount 字段注释。
+	//   recordTaskFailure: 计数 +1 并记录失败目标/时间。失败目标用于将来诊断或避让(目前只记录,
+	//                      不参与阈值判定 — 阈值是简单的连续失败累加)。
+	//   resetTaskFailCount: 真实成功时清零,避免久远失败累计阻塞正常作业。
+	public static void recordTaskFailure(Personality p, BlockPos failedTarget) {
+		if (p == null) return;
+		p.taskFailCount++;
+		p.lastFailedTarget = failedTarget;
+		p.lastTaskFailTime = System.currentTimeMillis();
+	}
+
+	public static void resetTaskFailCount(Personality p) {
+		if (p == null) return;
+		p.taskFailCount = 0;
+		p.lastFailedTarget = null;
+	}
 }

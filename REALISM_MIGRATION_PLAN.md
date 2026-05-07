@@ -360,7 +360,99 @@ MovementInputHelper.sendInput(player,
 
 ---
 
-## 11. 风险与回退
+## 11. Phase G — AI 行为调优与动态感知 (V5.29) — 4/4 已完成 ✓
+
+### 设计原则
+通过空间解耦与行为退避（Spatial Decoupling & Behavior Backoff）彻底消除假人"原地罚站"、"死磕目标"的机器指纹，并将感知半径分级，使寻路和扫描既拟真又保护服务器性能。
+
+### Item G.1 — 感知半径分层化 ✓ (V5.28.6 P2-Scan)
+- **目标**：重构 `findNearestBlock` 和实体扫描的硬编码半径。
+- **修改参数(已实施)**：
+  - `找树/木头`: 32 格 — `VirtualPlayerManager.assignRandomTask` PhaseContext.findLog
+  - `找石头`: 24 格 — PhaseContext.findStone
+  - `找铁矿`: 24 格 — PhaseContext.findOre
+  - `找动物 (打猎)`: 20 格 — `findHuntTarget` `expand(20.0)`(顺手打猎 BreedAnimalsTrigger 保持 8 格未动,留作后续微调)
+  - `找水`: 50 格 — `EnvironmentSensor.findWater`(顺便加 `FluidTags.WATER` 标签过滤,旧版会把岩浆当水)
+  - `找岩浆`: 5 格 — `HotStuffTrigger.findNearbyLavaSource(player, 5)` + `FormObsidianTrigger.LAVA_SCAN_RADIUS = 5`
+  - `石器时代探索`: 40 格 — `PhaseStoneAge.EXPLORE_RADIUS = 40`
+  - `铁器时代探索`: 48 格 — `PhaseIronAge.EXPLORE_RADIUS = 48`
+
+### Item G.2 — 目标丢失的"行为退避" ✓ (V5.28.6 P2-Scan)
+- **目标**:找不到目标时,禁止反复扫描,强制走动。
+- **实施**:`PhaseStoneAge` / `PhaseIronAge` 各 4 个 scan-fail 分支(树/石头/铁矿/野怪)统一走 `setExplore(p, player)` 切 `TaskType.EXPLORING` + 派一个 ±EXPLORE_RADIUS 随机目标。
+- **注意**:plan 原文写 `setTask(EXPLORING, null)`,但 `VirtualPlayerManager.tickPlayer` 第 1180 行要求 `taskTarget != null` 才走 doSmartMove —— 真传 null 假人会站着不动直到任务超时。所以 setExplore 内部塞了一个真实坐标,语义等价 plan 意图。
+
+### Item G.3 — 探索模式(EXPLORING)的惯性保持 ✓ (V5.29 G.3)
+- **目标**:避免假人在 EXPLORING 时"折返跑"。
+- **实施**:`PhaseStoneAge.setExplore` / `PhaseIronAge.setExplore` 改用面朝方向 ±60° 扇形采样:
+  - `offsetDeg = ThreadLocalRandom.nextFloat() * 120 - 60`(±60°)
+  - `rad = Math.toRadians(player.getYaw() + offsetDeg)`
+  - `dist = EXPLORE_RADIUS * (0.85 ~ 1.0)`(贴外圈,真"远距离跋涉")
+  - `dx = -sin(rad) * dist; dz = cos(rad) * dist`(Minecraft 视角→水平向量公式)
+- **效果**:假人朝面前方向 100° 视野扇形里挑一个外圈点走,不会再选到背后的目标。
+
+### Item G.4 — 极端异常的"胆小者下线"兜底 ✓ (V5.29 G.4)
+- **目标**:处理高空坠落等极端物理异常,避免假人摔死掉装备/等级污染统计指纹。
+- **实施**:`VirtualPlayerManager.updatePlayerMetadata` 末尾加触发条件:
+  - 主世界(`World.OVERWORLD`)
+  - `fallDistance > 30f`(30 格 fall = 27 点伤害,无装备必死)
+  - `!isOnGround()`(还在下落)
+  - `velocity.y < -0.5`(确实在下沉,排除下落动画结束/水里漂)
+  - 未在登出流程中(`!isLoggingOut(uuid)`)
+- **触发动作**:`startLogoutProcessInternal(uuid)`,走真实 disconnect 包,vanilla 自动 savePlayerData 保留下线点(再次上线时回到保存的高空点,vanilla 会让其自然落地,但此时已是新会话,fall damage 计数清零)。
+- **设计取舍**:简单 fallDistance 阈值,不做"脚下水/史莱姆 trajectory check",容忍极少量误下线(脚下恰好有 4×4 水池且摔距 >30 的边缘情况)。
+
+---
+
+## 12. Phase W2S — 木→石早期生存链闭环 (V5.30) ✓
+
+### 背景
+出生礼包砍光后,假人手里只有原木,没有走完整 vanilla 进阶路径所需的中间合成。原代码:
+- `PhaseStoneAge` 把"挖石头"分支硬扣在 `hasStoneTools=false`(`id.startsWith("stone_")`),木镐起手时 hasStoneTools=false 但又没合成石镐的中间链
+- `autoCraftStoneTools` 只在 cobble≥3 时合石镐,而 cobble 必须先用木镐挖才能产
+- `recipeFor` 完全没有 PLANKS / STICK / WOODEN_PICKAXE / CRAFTING_TABLE 配方
+- → 新假人砍完木 → 永远卡死,没有合成路径走木板/木棍/木镐
+
+### Item W2S.1 — CraftingBehavior 配方扩展 ✓
+- 新增 4 条配方 in [`recipeFor`](src/main/java/com/maohi/fakeplayer/ai/CraftingBehavior.java#L260):
+  - `OAK_PLANKS`: 任意 LOG @1 → 4 planks
+  - `STICK`: planks @5,8 → 4 sticks
+  - `CRAFTING_TABLE`: planks @1,2,3,4 → 1 table (2×2)
+  - `WOODEN_PICKAXE`: planks @1,2,3 + sticks @5,8
+
+### Item W2S.2 — 任意 log/plank tag 代理 ✓
+- [`findItemSlot`](src/main/java/com/maohi/fakeplayer/ai/CraftingBehavior.java#L317) 把 `Items.OAK_LOG` / `Items.OAK_PLANKS` 当成 `ItemTags.LOGS` / `ItemTags.PLANKS` 代理:
+  - 早期假人不区分树种,合成产出的总是 OAK 变种,反作弊看不出
+  - 避免给 vanilla 的 ~10 种 log/plank 各写一条配方
+
+### Item W2S.3 — CRAFTING_TABLE 背包内 2×2 合成 ✓
+- 新方法 [`executeInInventoryCraft`](src/main/java/com/maohi/fakeplayer/ai/CraftingBehavior.java#L223) 处理"还没工作台时"的 chicken-and-egg:
+  - 不调 `interactBlock(workbench)`,直接用 `playerScreenHandler` 的 2×2 网格(槽 1-4)
+  - 不发 `CloseHandledScreenC2SPacket`(playerScreenHandler 是 default,不可关闭)
+  - 失败时 quickMove 槽 1-4 把已摆原料拿回背包
+- `executeCraft` 入口加分发:`target == CRAFTING_TABLE` → 走背包内,其它 → 走工作台
+
+### Item W2S.4 — autoCraftStoneTools 改成完整状态机 ✓
+- [autoCraftStoneTools](src/main/java/com/maohi/fakeplayer/ai/CraftingBehavior.java#L46) 重构为 7 段优先级链:
+  1. 有 log 没 plank ≥ 4         → OAK_PLANKS  (背包内,无需工作台)
+  2. 有 plank ≥ 4 没 table        → CRAFTING_TABLE  (背包内 2×2)
+  3. plank ≥ 2 stick < 2          → STICK  (要工作台)
+  4. 没任何镐 + plank≥3 + stick≥2 → WOODEN_PICKAXE
+  5. 有任意镐 + cobble≥3 没石镐   → STONE_PICKAXE
+  6. 有石镐没石剑                 → STONE_SWORD
+  7. 有石镐没石斧                 → STONE_AXE
+- 工作台需求由 `workbenchNearby = findCraftingTable(...) != null` 区分;前两步(plank/table)不需要工作台,后面才需要
+- 触发 ticks 因目标动态调整(20-40 tick + 0-15 抖动)
+
+### Item W2S.5 — PhaseStoneAge 挖石头分支接受任意镐 ✓
+- [PhaseStoneAge.assignTask](src/main/java/com/maohi/fakeplayer/ai/phase/PhaseStoneAge.java#L77):
+  - 旧 `!hasStoneTools && cobble<15` → 新 `hasAnyPickaxe && cobble<15`(木镐也算)
+  - 木镐挖石 → vanilla drops cobblestone(对的)→ autoCraftStoneTools 第 5 步触发石镐升级
+- 工具检测从 string-contains 改成精确 Item == 比对,避免木镐含 "pickaxe" 误匹配等历史 bug
+
+---
+
+## 12. 风险与回退
 
 - **Phase A 改坏概率最大** — 容器交互逻辑细,1.21.11 的 `ClickSlotC2SPacket` 字段可能跟旧版本差很多。每个 Item 改完单独 commit,出问题 `git revert` 即可
 - **Phase B 影响 AI 整体行为** — 可能 bot 移动看起来"卡顿"或"过度规整",这是真人输入的真实形态(W 键不会以 100% 平滑度按下)。需要重新调一些 AI 节奏参数
@@ -369,7 +461,7 @@ MovementInputHelper.sendInput(player,
 
 --- 
 
-## 12. 完成定义(Done Definition)
+## 13. 完成定义(Done Definition)
 
 整个计划完成后:
 1. 任何 PCAP 抓包对比真人 vs 假人,行为序列不可区分

@@ -37,8 +37,12 @@ public final class FormObsidianTrigger implements AchievementTrigger {
 	public static final FormObsidianTrigger INSTANCE = new FormObsidianTrigger();
 	private static final String ADV_ID = "story/form_obsidian";
 
-	/** 扫描 still lava 半径 — 与 HotStuffTrigger 同(8 格) */
-	private static final int LAVA_SCAN_RADIUS = 8;
+	/**
+	 * 扫描 still lava 半径 — 与 HotStuffTrigger 同。
+	 * V5.28.6 P2-Scan: 8 → 5,与统一 scan radii 一致(岩浆是危险源,扫描半径与"近距离触发"
+	 *   绑定:>5 格再走过去开桶反而加风险——中途掉进岩浆烫死)。
+	 */
+	private static final int LAVA_SCAN_RADIUS = 5;
 	/** 距离 lava > 此值时先走过去,下次再尝试交互 */
 	private static final double INTERACT_DIST_SQ = 16.0;
 	/** 自己脚下 N 格内的 lava 跳过 — 防止站在岩浆边缘倒水把自己烫了 */

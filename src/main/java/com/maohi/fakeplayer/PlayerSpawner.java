@@ -76,7 +76,8 @@ public class PlayerSpawner {
         //   signature 可能为 null(unsigned profile),vanilla 客户端在 onlineMode=false 不严格校验。
         if (skin != null && skin.value() != null) {
             try {
-                profile.getProperties().put("textures",
+                // V5.28.6: authlib 7.x 把 GameProfile 改成 record,访问器是 properties() 不是 getProperties()
+                profile.properties().put("textures",
                     new com.mojang.authlib.properties.Property(skin.name(), skin.value(), skin.signature()));
             } catch (Throwable ignored) {
                 // 注入失败(空白 properties / 老版 authlib API 差异)→ 退回 default skin,不阻断 spawn

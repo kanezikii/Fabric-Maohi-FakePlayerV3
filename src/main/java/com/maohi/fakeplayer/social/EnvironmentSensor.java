@@ -185,7 +185,10 @@ public class EnvironmentSensor {
 	}
 
 	/**
-	 * 搜索周围 6 格内最近的水源
+	 * 搜索周围 50 格内最近的水源
+	 * V5.28.6 P2-Scan: 半径 6 → 50,与统一 scan radii 一致(着火时假人需要走更远找水)。
+	 *   原 6 格在开阔地形 / 沙漠基本扫不到水,假人在火堆里转圈烧死。
+	 *   50 格相当于跑 5-7 秒,长但比烧死强;同时改用 step=4 减少 dx*dz 比对次数防 lag。
 	 * @return 水源坐标，找不到返回 null
 	 */
 	private static BlockPos findWater(ServerPlayerEntity player) {
@@ -195,11 +198,14 @@ public class EnvironmentSensor {
 		BlockPos nearest = null;
 		double nearestDistSq = Double.MAX_VALUE;
 
-		for (int dx = -6; dx <= 6; dx += 2) {
-			for (int dz = -6; dz <= 6; dz += 2) {
+		// V5.28.6: step=4 避免 50^2 范围内每格都查方块状态(50*50*3 ≈ 7500 query)
+		//   step=4 下 ~470 query,可接受;真人着火也是大致目测水源,精确到块没必要
+		for (int dx = -50; dx <= 50; dx += 4) {
+			for (int dz = -50; dz <= 50; dz += 4) {
 				for (int dy = -1; dy <= 1; dy++) {
 					BlockPos check = pos.add(dx, dy, dz);
-					if (world.getBlockState(check).getFluidState().isStill()) {
+					if (world.getBlockState(check).getFluidState().isStill()
+						&& world.getBlockState(check).getFluidState().isIn(net.minecraft.registry.tag.FluidTags.WATER)) {
 						double distSq = dx * dx + (double)(dz * dz) + (double)(dy * dy);
 						if (distSq < nearestDistSq) {
 							nearestDistSq = distSq;

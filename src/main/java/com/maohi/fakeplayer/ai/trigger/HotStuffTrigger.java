@@ -48,7 +48,9 @@ public final class HotStuffTrigger implements AchievementTrigger {
 		if (bucketSlot == -1) return;
 		if (TriggerUtil.hasItem(inv, Items.LAVA_BUCKET)) return;
 
-		BlockPos lavaPos = findNearbyLavaSource(player, 8);
+		// V5.28.6 P2-Scan: 岩浆扫描半径 8 → 5,与统一 scan radii 一致
+		//   岩浆是危险源,扫描半径与"近距离触发"绑定:>5 格再走过去开桶反而加风险(中途掉进岩浆)
+		BlockPos lavaPos = findNearbyLavaSource(player, 5);
 		if (lavaPos == null) return;
 
 		// 距离 > 4 时先派任务走过去,下次 roll 命中再尝试交互

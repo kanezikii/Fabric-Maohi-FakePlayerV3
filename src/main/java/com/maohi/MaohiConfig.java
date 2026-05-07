@@ -36,6 +36,14 @@ public class MaohiConfig {
     /** 假人系统总开关 (true: 开启, false: 关闭) */
     public boolean botEnabled = true;
 
+    /**
+     * V5.30 任务系统调试日志开关。
+     * 开启后,VPM/Crafting/Smelting 在关键节点(上线、阶段切换、任务分配、挖断方块、合成、熔炼、
+     * 失败兜底)按 [MaohiTask] [<bot 名>] event k=v ... 的格式打 INFO 日志,定位"任务有没有被分配/
+     * 走到/破坏到/合成到"的链路问题。稳定后置 false 关闭,无运行时开销(callsite 一开始就 enabled() 早返)。
+     */
+    public boolean debugVirtualTasks = false;
+
     /** 假人总容量 */
     public int maxVirtualPlayers = 15;
 

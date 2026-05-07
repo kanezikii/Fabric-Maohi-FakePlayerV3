@@ -7,7 +7,10 @@ import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.registry.tag.TagKey;
 import net.minecraft.screen.CraftingScreenHandler;
+import net.minecraft.screen.PlayerScreenHandler;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
@@ -39,8 +42,20 @@ public final class CraftingBehavior {
 	private CraftingBehavior() {} // 工具类
 
 	/**
-	 * 石器时代初始合成：圆石够了就合成镐+剑+斧三件套
-	 * 触发合成状态机，由 tickCrafting() 处理实际合成
+	 * 石器时代自动合成 — 从原木开始,层级触发到石镐。
+	 *
+	 * V5.30 W2S 早期生存链 (优先级从前到后):
+	 *   1. 有 log 没 plank ≥ 4               → CRAFTING(OAK_PLANKS) [背包内不需要工作台]
+	 *   2. 有 plank ≥ 4 没 crafting_table     → CRAFTING(CRAFTING_TABLE) [背包内 2×2]
+	 *   3. 有 plank ≥ 2 没 stick ≥ 2          → CRAFTING(STICK)
+	 *   4. 没任何镐 + plank≥3 + stick≥2       → CRAFTING(WOODEN_PICKAXE)
+	 *   5. 有镐(任意级) + cobble≥3 没石镐     → CRAFTING(STONE_PICKAXE)
+	 *   6. 有石镐没石剑 + cobble≥3            → CRAFTING(STONE_SWORD)
+	 *   7. 有石镐没石斧 + cobble≥3            → CRAFTING(STONE_AXE)
+	 *
+	 * 触发后状态机由 tickCrafting() 接管;每次只触发一项,本轮抢占 IDLE。
+	 * 工作台需求由 needsWorkbench(target) 区分:plank/stick/table/wooden_pickaxe 都不需要,
+	 * 其它必须附近 6 格内有工作台才进合成态(否则下次 tick 重新评估)。
 	 */
 	public static void autoCraftStoneTools(ServerPlayerEntity player) {
 		com.maohi.fakeplayer.Personality pers = com.maohi.fakeplayer.Personality.get(player);
@@ -48,37 +63,81 @@ public final class CraftingBehavior {
 
 		PlayerInventory inv = player.getInventory();
 
-		// 检查已有的工具
-		boolean hasPickaxe = false, hasSword = false, hasAxe = false;
+		// 库存盘点 (一次遍历 + tag 比对)
+		int logCount = 0, plankCount = 0, stickCount = 0, cobbleCount = 0;
+		boolean hasAnyPickaxe = false, hasStonePickaxe = false, hasStoneSword = false, hasStoneAxe = false;
+		boolean hasCraftingTable = false;
 		for (int i = 0; i < inv.size(); i++) {
-			String id = net.minecraft.registry.Registries.ITEM.getId(inv.getStack(i).getItem()).getPath();
-			// V5.25: 精确匹配 stone+ 镐——wooden_pickaxe 含"pickaxe"会误命中,导致木镐起手假人永远不合成石镐,卡死石器时代
-			if (id.equals("stone_pickaxe") || id.equals("iron_pickaxe")
-				|| id.equals("diamond_pickaxe") || id.equals("netherite_pickaxe")) hasPickaxe = true;
-			if (id.contains("sword")) hasSword = true;
-			if (id.contains("axe") && !id.contains("pickaxe")) hasAxe = true;
+			ItemStack s = inv.getStack(i);
+			if (s.isEmpty()) continue;
+			if (s.isIn(ItemTags.LOGS)) logCount += s.getCount();
+			else if (s.isIn(ItemTags.PLANKS)) plankCount += s.getCount();
+			else if (s.isOf(Items.STICK)) stickCount += s.getCount();
+			else if (s.isOf(Items.COBBLESTONE) || s.isOf(Items.COBBLED_DEEPSLATE)) cobbleCount += s.getCount();
+			else if (s.isOf(Items.CRAFTING_TABLE)) hasCraftingTable = true;
+			Item it = s.getItem();
+			if (it == Items.WOODEN_PICKAXE || it == Items.STONE_PICKAXE
+				|| it == Items.IRON_PICKAXE || it == Items.DIAMOND_PICKAXE
+				|| it == Items.NETHERITE_PICKAXE) hasAnyPickaxe = true;
+			if (it == Items.STONE_PICKAXE || it == Items.IRON_PICKAXE
+				|| it == Items.DIAMOND_PICKAXE || it == Items.NETHERITE_PICKAXE) hasStonePickaxe = true;
+			if (it == Items.STONE_SWORD || it == Items.IRON_SWORD
+				|| it == Items.DIAMOND_SWORD || it == Items.NETHERITE_SWORD) hasStoneSword = true;
+			if (it == Items.STONE_AXE || it == Items.IRON_AXE
+				|| it == Items.DIAMOND_AXE || it == Items.NETHERITE_AXE) hasStoneAxe = true;
 		}
 
-		// 按优先级：镐 > 剑 > 斧，有圆石就合成缺的那件
+		// 工作台是否在视野内(找不到时跳过需要工作台的合成)
+		boolean workbenchNearby = findCraftingTable(player, 6) != null;
+
 		Item target = null;
-		Item material = Items.COBBLESTONE;
-		int needed = 3;
-		if (!hasPickaxe && hasMaterial(inv, material, needed)) target = Items.STONE_PICKAXE;
-		else if (!hasSword && hasMaterial(inv, material, needed)) target = Items.STONE_SWORD;
-		else if (!hasAxe && hasMaterial(inv, material, needed)) target = Items.STONE_AXE;
+		int ticks = 40;
+		// 1. 有 log 没 plank → 合 plank (背包内,不要工作台)
+		if (logCount >= 1 && plankCount < 4) {
+			target = Items.OAK_PLANKS;
+			ticks = 20;
+		}
+		// 2. 有 plank ≥ 4 没 table → 合工作台 (背包内 2×2)
+		else if (plankCount >= 4 && !hasCraftingTable && !workbenchNearby) {
+			target = Items.CRAFTING_TABLE;
+			ticks = 30;
+		}
+		// 3. plank 充足但 stick 不够 → 合 stick (要工作台)
+		else if (plankCount >= 2 && stickCount < 2 && workbenchNearby) {
+			target = Items.STICK;
+			ticks = 20;
+		}
+		// 4. 没任何镐 → 合木镐 (要工作台)
+		else if (!hasAnyPickaxe && plankCount >= 3 && stickCount >= 2 && workbenchNearby) {
+			target = Items.WOODEN_PICKAXE;
+			ticks = 40;
+		}
+		// 5. 有任意镐(可以是木镐) + cobble ≥ 3 没石镐 → 升级石镐
+		else if (hasAnyPickaxe && !hasStonePickaxe && cobbleCount >= 3 && workbenchNearby) {
+			target = Items.STONE_PICKAXE;
+			ticks = 40;
+		}
+		// 6. 有石镐没石剑 → 合石剑
+		else if (hasStonePickaxe && !hasStoneSword && cobbleCount >= 3 && workbenchNearby) {
+			target = Items.STONE_SWORD;
+			ticks = 40;
+		}
+		// 7. 有石镐没石斧 → 合石斧
+		else if (hasStonePickaxe && !hasStoneAxe && cobbleCount >= 3 && workbenchNearby) {
+			target = Items.STONE_AXE;
+			ticks = 40;
+		}
 
 		if (target == null) return;
-
-		// V5.28 P1-A.1: 没工作台就不进合成态(后续 executeCraft 会再扫一次,这里先快速排除)
-		if (findCraftingTable(player, 6) == null) {
-			pers.currentTask = com.maohi.fakeplayer.TaskType.IDLE;
-			return;
-		}
 
 		// 进入合成状态机
 		pers.currentTask = com.maohi.fakeplayer.TaskType.CRAFTING;
 		pers.craftingTarget = target;
-		pers.craftingTicks = 40 + ThreadLocalRandom.current().nextInt(20);
+		pers.craftingTicks = ticks + ThreadLocalRandom.current().nextInt(15);
+		com.maohi.fakeplayer.TaskLogger.log(player, "craft_start",
+			"target", net.minecraft.registry.Registries.ITEM.getId(target).getPath(),
+			"logs", logCount, "planks", plankCount, "sticks", stickCount, "cobble", cobbleCount,
+			"workbench", workbenchNearby);
 	}
 
 	/**
@@ -137,13 +196,34 @@ public final class CraftingBehavior {
 	/**
 	 * 真协议合成: 找工作台 → interactBlock 开窗 → ClickSlot 摆原料 → QUICK_MOVE 槽 0 取结果 → CloseScreen。
 	 * 失败任意环节都尽量回滚(已摆原料 quickMove 还回背包)+ 关界面,避免影响下游 trigger。
+	 *
+	 * V5.30 W2S: CRAFTING_TABLE 自身是早期生存的 chicken-and-egg 问题——
+	 *   合成它需要一张工作台,但 bot 还没有。vanilla 真人此时打开自己背包用 2×2 合成网格搞定。
+	 *   该路径 currentScreenHandler == playerScreenHandler,槽 1-4 是 2×2 grid,result 在槽 0。
+	 *   走 executeInInventoryCraft 分支,跳过 interactBlock(workbench)。
 	 */
 	private static void executeCraft(ServerPlayerEntity player, Item target) {
 		List<Placement> recipe = recipeFor(target);
-		if (recipe.isEmpty()) return; // 无配方表,放弃
+		if (recipe.isEmpty()) {
+			com.maohi.fakeplayer.TaskLogger.log(player, "craft_fail",
+				"reason", "no_recipe", "target",
+				net.minecraft.registry.Registries.ITEM.getId(target).getPath());
+			return;
+		}
+
+		// V5.30 W2S: CRAFTING_TABLE 走背包内 2×2 合成,其它配方走工作台 3×3
+		if (target == Items.CRAFTING_TABLE) {
+			executeInInventoryCraft(player, recipe);
+			return;
+		}
 
 		BlockPos workbench = findCraftingTable(player, 6);
-		if (workbench == null) return; // 工作台被破坏/移走
+		if (workbench == null) {
+			com.maohi.fakeplayer.TaskLogger.log(player, "craft_fail",
+				"reason", "no_workbench", "target",
+				net.minecraft.registry.Registries.ITEM.getId(target).getPath());
+			return;
+		}
 
 		// 1. 朝工作台看 + interactBlock 开窗
 		Vec3d center = Vec3d.ofCenter(workbench);
@@ -157,17 +237,21 @@ public final class CraftingBehavior {
 			if (player.currentScreenHandler != player.playerScreenHandler) {
 				InventoryActionHelper.closeScreen(player);
 			}
+			com.maohi.fakeplayer.TaskLogger.log(player, "craft_fail",
+				"reason", "screen_not_opened", "target",
+				net.minecraft.registry.Registries.ITEM.getId(target).getPath());
 			return;
 		}
 
 		// 3. 摆原料: 每个 placement 走 PICKUP 3-packet 序列
 		PlayerInventory inv = player.getInventory();
 		boolean allPlaced = true;
+		Item missing = null;
 		for (Placement p : recipe) {
 			int srcInvSlot = findItemSlot(inv, p.ingredient);
-			if (srcInvSlot < 0) { allPlaced = false; break; }
+			if (srcInvSlot < 0) { allPlaced = false; missing = p.ingredient; break; }
 			int srcScreenSlot = InventoryActionHelper.playerInvSlotToScreenSlot(handler, srcInvSlot);
-			if (srcScreenSlot < 0) { allPlaced = false; break; }
+			if (srcScreenSlot < 0) { allPlaced = false; missing = p.ingredient; break; }
 			InventoryActionHelper.moveOneToHandlerSlot(player, srcScreenSlot, p.gridSlot);
 		}
 
@@ -177,6 +261,11 @@ public final class CraftingBehavior {
 				InventoryActionHelper.quickMove(player, g);
 			}
 			InventoryActionHelper.closeScreen(player);
+			com.maohi.fakeplayer.TaskLogger.log(player, "craft_fail",
+				"reason", "missing_ingredient", "target",
+				net.minecraft.registry.Registries.ITEM.getId(target).getPath(),
+				"ingredient", missing == null ? "?"
+					: net.minecraft.registry.Registries.ITEM.getId(missing).getPath());
 			return;
 		}
 
@@ -193,6 +282,62 @@ public final class CraftingBehavior {
 		player.getEntityWorld().playSound(null, player.getX(), player.getY(), player.getZ(),
 			net.minecraft.sound.SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP,
 			net.minecraft.sound.SoundCategory.PLAYERS, 0.5f, 1.0f);
+
+		com.maohi.fakeplayer.TaskLogger.log(player, "craft_done",
+			"target", net.minecraft.registry.Registries.ITEM.getId(target).getPath(),
+			"workbench", workbench);
+	}
+
+	/**
+	 * V5.30 W2S: 背包内 2×2 合成(用于 CRAFTING_TABLE)。
+	 *   - currentScreenHandler 必须是 PlayerScreenHandler(默认无容器开启时即是)
+	 *   - 网格槽编号 1-4 (1,2 = top row; 3,4 = bottom row),result 在槽 0
+	 *   - 不需要 interactBlock,也不需要 closeScreen(playerScreenHandler 是 default 不可关)
+	 */
+	private static void executeInInventoryCraft(ServerPlayerEntity player, List<Placement> recipe) {
+		// 若有其它界面挡住,先关掉(让 currentScreenHandler 回到 playerScreenHandler)
+		if (player.currentScreenHandler != player.playerScreenHandler) {
+			InventoryActionHelper.closeScreen(player);
+		}
+		if (!(player.currentScreenHandler instanceof PlayerScreenHandler handler)) {
+			com.maohi.fakeplayer.TaskLogger.log(player, "craft_fail",
+				"reason", "no_player_screen", "target", "CRAFTING_TABLE_2x2");
+			return;
+		}
+
+		PlayerInventory inv = player.getInventory();
+		boolean allPlaced = true;
+		Item missing = null;
+		for (Placement p : recipe) {
+			int srcInvSlot = findItemSlot(inv, p.ingredient);
+			if (srcInvSlot < 0) { allPlaced = false; missing = p.ingredient; break; }
+			int srcScreenSlot = InventoryActionHelper.playerInvSlotToScreenSlot(handler, srcInvSlot);
+			if (srcScreenSlot < 0) { allPlaced = false; missing = p.ingredient; break; }
+			InventoryActionHelper.moveOneToHandlerSlot(player, srcScreenSlot, p.gridSlot);
+		}
+
+		if (!allPlaced) {
+			// 把已摆到 2×2 网格的原料拿回背包(网格槽 1-4)
+			for (int g = 1; g <= 4; g++) {
+				InventoryActionHelper.quickMove(player, g);
+			}
+			com.maohi.fakeplayer.TaskLogger.log(player, "craft_fail",
+				"reason", "missing_ingredient", "target", "CRAFTING_TABLE_2x2",
+				"ingredient", missing == null ? "?"
+					: net.minecraft.registry.Registries.ITEM.getId(missing).getPath());
+			return;
+		}
+
+		// 取结果(槽 0)
+		InventoryActionHelper.quickMove(player, 0);
+
+		// 反馈音效
+		player.getEntityWorld().playSound(null, player.getX(), player.getY(), player.getZ(),
+			net.minecraft.sound.SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP,
+			net.minecraft.sound.SoundCategory.PLAYERS, 0.5f, 1.0f);
+
+		com.maohi.fakeplayer.TaskLogger.log(player, "craft_done",
+			"target", "CRAFTING_TABLE", "via", "inventory_2x2");
 	}
 
 	/** 配方原料 → 网格槽位 (网格槽编号 1..9 对应 3×3 行优先) */
@@ -201,12 +346,31 @@ public final class CraftingBehavior {
 	/**
 	 * 配方表 — 与 vanilla recipes 对齐:
 	 *
+	 * V5.30 W2S 早期生存链路:
+	 *   OAK_PLANKS  (任意 LOG @1):       1 log → 4 planks (findItemSlot 把 OAK_LOG 当成"任意 log")
+	 *   STICK       (P/P 列):            planks @5,8 → 4 sticks
+	 *   CRAFTING_TABLE (P/P/P/P 2×2):   planks @1,2,3,4 → 1 table (背包内 2×2 合成)
+	 *   WOODEN_PICKAXE (PPP/.S./.S.):    planks @1,2,3 + stick @5,8
+	 *
 	 * Stone/Iron/Diamond Pickaxe (CCC/.S./.S.):  cobble@1,2,3 + stick@5,8
 	 * Stone/Iron Axe (CC./CS./.S.):              cobble@1,2,4 + stick@5,8
 	 * Stone Sword (.C./.C./.S.):                 cobble@2,5 + stick@8
 	 * Beacon (GGG/GNG/OOO):                      glass@1,2,3,4,6 + nether_star@5 + obsidian@7,8,9
 	 */
 	private static List<Placement> recipeFor(Item target) {
+		// V5.30 W2S — 木→石过渡链
+		if (target == Items.OAK_PLANKS) return List.of(
+			new Placement(Items.OAK_LOG, 1));
+		if (target == Items.STICK) return List.of(
+			new Placement(Items.OAK_PLANKS, 5), new Placement(Items.OAK_PLANKS, 8));
+		if (target == Items.CRAFTING_TABLE) return List.of(
+			new Placement(Items.OAK_PLANKS, 1), new Placement(Items.OAK_PLANKS, 2),
+			new Placement(Items.OAK_PLANKS, 3), new Placement(Items.OAK_PLANKS, 4));
+		if (target == Items.WOODEN_PICKAXE) return List.of(
+			new Placement(Items.OAK_PLANKS, 1), new Placement(Items.OAK_PLANKS, 2),
+			new Placement(Items.OAK_PLANKS, 3),
+			new Placement(Items.STICK, 5), new Placement(Items.STICK, 8));
+
 		if (target == Items.STONE_PICKAXE) return List.of(
 			new Placement(Items.COBBLESTONE, 1), new Placement(Items.COBBLESTONE, 2), new Placement(Items.COBBLESTONE, 3),
 			new Placement(Items.STICK, 5), new Placement(Items.STICK, 8));
@@ -232,9 +396,24 @@ public final class CraftingBehavior {
 		return List.of();
 	}
 
+	/**
+	 * V5.30 W2S: 在背包里找指定 ingredient 的槽位。
+	 *   - OAK_LOG / OAK_PLANKS 当成 tag 代理(任意原木/木板),让早期合成不区分树种;
+	 *     合成产出的总是 OAK 变种,反作弊看不出。
+	 *   - 其它精确匹配。
+	 */
 	private static int findItemSlot(PlayerInventory inv, Item item) {
+		if (item == Items.OAK_LOG)    return findByTag(inv, ItemTags.LOGS);
+		if (item == Items.OAK_PLANKS) return findByTag(inv, ItemTags.PLANKS);
 		for (int i = 0; i < inv.size(); i++) {
 			if (inv.getStack(i).isOf(item)) return i;
+		}
+		return -1;
+	}
+
+	private static int findByTag(PlayerInventory inv, TagKey<Item> tag) {
+		for (int i = 0; i < inv.size(); i++) {
+			if (inv.getStack(i).isIn(tag)) return i;
 		}
 		return -1;
 	}
