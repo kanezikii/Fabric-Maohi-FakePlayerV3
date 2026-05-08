@@ -258,18 +258,18 @@ public class PlayerSpawner {
 
     /**
      * V5.38: 读 spawnRadius gamerule(vanilla 默认 10)。
-     * 1.21.11 yarn:MinecraftServer.getSpawnRadius(ServerWorld) 返回 int(取自 GameRules.SPAWN_RADIUS)。
+     * 1.21.11 yarn:GameRules.RESPAWN_RADIUS(mojmap 叫 SPAWN_RADIUS)。
      */
     private static int readSpawnRadius(net.minecraft.server.MinecraftServer server, net.minecraft.server.world.ServerWorld world) {
-        return server.getSpawnRadius(world);
+        return world.getGameRules().getInt(net.minecraft.world.GameRules.RESPAWN_RADIUS);
     }
 
     /**
-     * V5.38: 在 base ±radius 内挑安全落点,模拟 vanilla `PlayerList.placeNewPlayer` 行为。
-     *   - 重试最多 10 次,每次随机 (dx, dz) ∈ [-radius, radius]
-     *   - 用 PathfindingNavigation.getSafeTopY 拿该列地表 Y(已处理 chunk 未加载/空气柱)
-     *   - 找不到合理 Y → 落回 base
-     *   - radius == 0 → 直接返 base(spawnRadius=0 时 vanilla 也不散)
+     * V5.38: 在 base 周围 radius 半径内挑安全落点,模拟 vanilla `PlayerList.placeNewPlayer` 行为。
+     * 用极坐标(angle ∈ [0,2π) + distance ∈ [0,radius])保证圆形分布,更贴近 vanilla 圆形散开。
+     *   - 重试最多 10 次找安全 Y
+     *   - getSafeTopY 已处理 chunk 未加载/空气柱
+     *   - radius == 0 → 直接返 base(/gamerule respawnRadius 0 时 vanilla 不散)
      */
     private static net.minecraft.util.math.BlockPos pickScatteredSpawn(
             net.minecraft.server.world.ServerWorld world,
@@ -278,10 +278,10 @@ public class PlayerSpawner {
         if (radius <= 0) return base;
         java.util.concurrent.ThreadLocalRandom rng = java.util.concurrent.ThreadLocalRandom.current();
         for (int attempt = 0; attempt < 10; attempt++) {
-            int dx = rng.nextInt(-radius, radius + 1);
-            int dz = rng.nextInt(-radius, radius + 1);
-            int candidateX = base.getX() + dx;
-            int candidateZ = base.getZ() + dz;
+            double angle = rng.nextDouble() * Math.PI * 2.0;
+            double distance = rng.nextDouble() * radius;
+            int candidateX = base.getX() + (int) Math.round(Math.cos(angle) * distance);
+            int candidateZ = base.getZ() + (int) Math.round(Math.sin(angle) * distance);
             int candidateY = com.maohi.fakeplayer.ai.PathfindingNavigation.getSafeTopY(
                 world, candidateX, candidateZ, Integer.MIN_VALUE);
             if (candidateY != Integer.MIN_VALUE && candidateY > world.getBottomY()) {
