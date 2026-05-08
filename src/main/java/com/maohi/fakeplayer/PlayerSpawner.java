@@ -258,10 +258,11 @@ public class PlayerSpawner {
 
     /**
      * V5.38: 读 spawnRadius gamerule(vanilla 默认 10)。
-     * 1.21.11 yarn:GameRules.RESPAWN_RADIUS(mojmap 叫 SPAWN_RADIUS)。
+     * 1.21.11 yarn:GameRules 在 net.minecraft.world.rule.GameRules,字段名 RESPAWN_RADIUS
+     * (mojmap 叫 SPAWN_RADIUS)。
      */
     private static int readSpawnRadius(net.minecraft.server.MinecraftServer server, net.minecraft.server.world.ServerWorld world) {
-        return world.getGameRules().getInt(net.minecraft.world.GameRules.RESPAWN_RADIUS);
+        return world.getGameRules().getInt(net.minecraft.world.rule.GameRules.RESPAWN_RADIUS);
     }
 
     /**
