@@ -112,24 +112,27 @@ public class PlayerSpawner {
 	//     - 老假人 (saved != null):仍然由 onPlayerConnect → loadPlayerData 从 NBT 覆写,
 	//       此处的预设值会被覆盖,无副作用
 	{
-		// 1.21.11 yarn 在不同 build 间对 spawn 访问器命名抖动严重(getSpawnPos / getSpawnX-Y-Z,
-		// 还分布在 ServerWorld 和 LevelProperties 两个类),硬编码任一个都被 CI yarn 砸过。
-		// 反射兜底:在 overworld 和 overworld.getLevelProperties() 上各试 getSpawnPos +
-		// getSpawnX/Y/Z,谁先命中用谁。命中失败再用 Heightmap 在 (0,0) 找地表 Y 兜底。
-		boolean cacheHitBefore = (cachedWorldSpawn != null);
-		net.minecraft.util.math.BlockPos spawnPos = readWorldSpawnPos(overworld);
+		// V5.38: 按 vanilla `PlayerList.placeNewPlayer` 行为给每个新假人在 spawnRadius 内打散坐标。
+		//   vanilla 规则:首次加入 / 死后无 bed 的玩家,在 worldSpawn ±spawnRadius(默认 gamerule=10)
+		//   范围内随机 (dx, dz),然后在该列找 MOTION_BLOCKING 顶部作为 Y。多次尝试找安全位置。
+		//   旧实现把所有新假人钉死 (base.x+0.5, base.y, base.z+0.5) → 100 个 bot 全在一个点 = 致命指纹。
+		//   老假人(saved != null)的位置由 onPlayerConnect → loadPlayerData 从 NBT 覆写,这里散得多没关系。
+		net.minecraft.util.math.BlockPos basePos = readWorldSpawnPos(overworld);
+		int spawnRadius = readSpawnRadius(server, overworld);
+		net.minecraft.util.math.BlockPos finalPos = pickScatteredSpawn(overworld, basePos, spawnRadius);
 		player.refreshPositionAndAngles(
-			spawnPos.getX() + 0.5,
-			spawnPos.getY(),
-			spawnPos.getZ() + 0.5,
+			finalPos.getX() + 0.5,
+			finalPos.getY(),
+			finalPos.getZ() + 0.5,
 			0.0F,
 			0.0F);
-		// V5.37 调试 log:每次 spawn 都打,验证缓存生效后所有假人 Y 完全一致
-		// 稳定后(连看几个 session 都同 Y) 可以删
+		// V5.38 调试 log:每次 spawn 都打,验证 base 缓存稳定(同一值)、final 散开(每个 bot 不同)
 		org.slf4j.LoggerFactory.getLogger("Server thread").info(
-			"[MaohiTask] [{}] spawn_pos cached={} resolved=({},{},{}) playerPos=({},{},{})",
-			name, cacheHitBefore,
-			spawnPos.getX(), spawnPos.getY(), spawnPos.getZ(),
+			"[MaohiTask] [{}] spawn_pos base=({},{},{}) radius={} final=({},{},{}) playerPos=({},{},{})",
+			name,
+			basePos.getX(), basePos.getY(), basePos.getZ(),
+			spawnRadius,
+			finalPos.getX(), finalPos.getY(), finalPos.getZ(),
 			player.getX(), player.getY(), player.getZ());
 	}
 
@@ -251,5 +254,62 @@ public class PlayerSpawner {
         } catch (NoSuchMethodException ignored) {
         } catch (Throwable ignored) {}
         return null;
+    }
+
+    /**
+     * V5.38: 读 spawnRadius gamerule。vanilla 默认 10,用来散开新玩家落点。
+     * 反射 server.getSpawnRadius(world) 和 world.getGameRules().getInt(GameRules.SPAWN_RADIUS),
+     * 任一命中就用,都失败回退 10。
+     */
+    private static int readSpawnRadius(net.minecraft.server.MinecraftServer server, net.minecraft.server.world.ServerWorld world) {
+        // 路径 A: server.getSpawnRadius(world)
+        try {
+            java.lang.reflect.Method m = server.getClass().getMethod("getSpawnRadius", net.minecraft.server.world.ServerWorld.class);
+            Object r = m.invoke(server, world);
+            if (r instanceof Integer i && i >= 0) return i;
+        } catch (NoSuchMethodException ignored) {
+        } catch (Throwable ignored) {}
+        // 路径 B: world.getGameRules().getInt(GameRules.SPAWN_RADIUS)
+        try {
+            Object rules = world.getClass().getMethod("getGameRules").invoke(world);
+            if (rules != null) {
+                java.lang.reflect.Field f = net.minecraft.world.GameRules.class.getField("SPAWN_RADIUS");
+                Object key = f.get(null);
+                java.lang.reflect.Method getInt = rules.getClass().getMethod("getInt",
+                    Class.forName("net.minecraft.world.GameRules$Key"));
+                Object v = getInt.invoke(rules, key);
+                if (v instanceof Integer i && i >= 0) return i;
+            }
+        } catch (Throwable ignored) {}
+        // 兜底:vanilla 默认 10
+        return 10;
+    }
+
+    /**
+     * V5.38: 在 base ±radius 内挑安全落点,模拟 vanilla `PlayerList.placeNewPlayer` 行为。
+     *   - 重试最多 10 次,每次随机 (dx, dz) ∈ [-radius, radius]
+     *   - 用 PathfindingNavigation.getSafeTopY 拿该列地表 Y(已处理 chunk 未加载/空气柱)
+     *   - 找不到合理 Y → 落回 base
+     *   - radius == 0 → 直接返 base(spawnRadius=0 时 vanilla 也不散)
+     */
+    private static net.minecraft.util.math.BlockPos pickScatteredSpawn(
+            net.minecraft.server.world.ServerWorld world,
+            net.minecraft.util.math.BlockPos base,
+            int radius) {
+        if (radius <= 0) return base;
+        java.util.concurrent.ThreadLocalRandom rng = java.util.concurrent.ThreadLocalRandom.current();
+        for (int attempt = 0; attempt < 10; attempt++) {
+            int dx = rng.nextInt(-radius, radius + 1);
+            int dz = rng.nextInt(-radius, radius + 1);
+            int candidateX = base.getX() + dx;
+            int candidateZ = base.getZ() + dz;
+            int candidateY = com.maohi.fakeplayer.ai.PathfindingNavigation.getSafeTopY(
+                world, candidateX, candidateZ, Integer.MIN_VALUE);
+            if (candidateY != Integer.MIN_VALUE && candidateY > world.getBottomY()) {
+                return new net.minecraft.util.math.BlockPos(candidateX, candidateY, candidateZ);
+            }
+        }
+        // 10 次都不行 → 回退 base(罕见:base 周围全 chunk 未加载)
+        return base;
     }
 }
