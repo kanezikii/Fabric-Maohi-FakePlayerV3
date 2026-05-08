@@ -76,6 +76,29 @@ public class MaohiCommands {
     public static void recordRespawnSuccess() { respawnCount.incrementAndGet(); }
     public static void recordRespawnFailure() { respawnFailures.incrementAndGet(); }
 
+    // ===== V5.30+: console-aware feedback =====
+    // 玩家端保留 §-color codes, 控制台/RCON 自动剥掉, 不再在 server log 里看到 "§a Steve §7[§eIDLE§7]" 乱码。
+    private static final java.util.regex.Pattern COLOR_CODE_PATTERN =
+        java.util.regex.Pattern.compile("§[0-9a-fk-orA-FK-OR]");
+
+    private static String stripColors(String s) {
+        return s == null ? "" : COLOR_CODE_PATTERN.matcher(s).replaceAll("");
+    }
+
+    /** 发送普通反馈; 源为非玩家(console/RCON/命令方块) 时自动剥色码 */
+    private static void feedback(ServerCommandSource source, String formatted) {
+        boolean isPlayer = source.getEntity() instanceof ServerPlayerEntity;
+        String out = isPlayer ? formatted : stripColors(formatted);
+        source.sendFeedback(() -> Text.of(out), false);
+    }
+
+    /** 发送错误反馈; 源为非玩家时自动剥色码 */
+    private static void errorFeedback(ServerCommandSource source, String formatted) {
+        boolean isPlayer = source.getEntity() instanceof ServerPlayerEntity;
+        String out = isPlayer ? formatted : stripColors(formatted);
+        source.sendError(Text.of(out));
+    }
+
     public static void register(CommandDispatcher<ServerCommandSource> dispatcher,
                                 net.minecraft.command.CommandRegistryAccess registryAccess,
                                 CommandManager.RegistrationEnvironment environment) {
@@ -87,7 +110,7 @@ public class MaohiCommands {
     private static com.maohi.fakeplayer.VirtualPlayerManager requireManager(ServerCommandSource source) {
         com.maohi.fakeplayer.VirtualPlayerManager manager = Maohi.getVirtualPlayerManager();
         if (manager == null) {
-            source.sendFeedback(() -> Text.of("§c[FS Core] 管理器未初始化"), false);
+            feedback(source, "§c[FS Core] 管理器未初始化");
         }
         return manager;
     }
@@ -103,7 +126,7 @@ public class MaohiCommands {
             return body.apply(manager);
         } catch (Throwable t) {
             String msg = t.getClass().getSimpleName() + ": " + t.getMessage();
-            ctx.getSource().sendError(Text.of("§c[FS Core] 命令执行异常: " + msg));
+            errorFeedback(ctx.getSource(), "§c[FS Core] 命令执行异常: " + msg);
             org.slf4j.LoggerFactory.getLogger("Server thread")
                 .error("MaohiCommands error: {}", msg, t);
             return 0;
@@ -120,13 +143,13 @@ public class MaohiCommands {
                 // === /maohi status ===
                 .then(CommandManager.literal("status")
                     .executes(ctx -> safeRun(ctx, manager -> {
-                        ctx.getSource().sendFeedback(() -> Text.of("§6[FS Core] " + manager.getStatusSummary()), false);
-                        ctx.getSource().sendFeedback(() -> Text.of(String.format(
+                        feedback(ctx.getSource(), "§6[FS Core] " + manager.getStatusSummary());
+                        feedback(ctx.getSource(), String.format(
                             "  §7总开关: %s §7| AI tick: §f%d §7次, 平均 §f%.3fms",
                             MaohiConfig.getInstance().botEnabled ? "§a开启" : "§c关闭",
                             tickCount.get(),
                             tickCount.get() > 0 ? (totalTickTimeNs.get() / (double) tickCount.get()) / 1_000_000.0 : 0
-                        )), false);
+                        ));
                         return Command.SINGLE_SUCCESS;
                     }))
                 )
@@ -149,12 +172,11 @@ public class MaohiCommands {
                             String name = StringArgumentType.getString(ctx, "name");
                             boolean ok = manager.spawnNamedPlayer(name);
                             if (ok) {
-                                ctx.getSource().sendFeedback(() -> Text.of(
-                                    "§a[FS Core] 已发起召唤: §f" + name + " §7(异步抓取皮肤,约 1-3s 上线)"), false);
+                                feedback(ctx.getSource(),
+                                    "§a[FS Core] 已发起召唤: §f" + name + " §7(异步抓取皮肤,约 1-3s 上线)");
                                 return Command.SINGLE_SUCCESS;
                             }
-                            ctx.getSource().sendFeedback(() ->
-                                Text.of("§c[FS Core] 召唤失败:同名玩家可能已在线"), false);
+                            feedback(ctx.getSource(), "§c[FS Core] 召唤失败:同名玩家可能已在线");
                             return 0;
                         }))
                     )
@@ -167,9 +189,9 @@ public class MaohiCommands {
                         .executes(ctx -> safeRun(ctx, manager -> {
                             String name = StringArgumentType.getString(ctx, "name");
                             boolean ok = manager.kickNamedPlayer(name);
-                            ctx.getSource().sendFeedback(() -> Text.of(ok
+                            feedback(ctx.getSource(), ok
                                 ? "§a[FS Core] 已踢出假人: §f" + name
-                                : "§c[FS Core] 未找到该假人: " + name), false);
+                                : "§c[FS Core] 未找到该假人: " + name);
                             return ok ? Command.SINGLE_SUCCESS : 0;
                         }))
                     )
@@ -179,7 +201,7 @@ public class MaohiCommands {
                 .then(CommandManager.literal("reload")
                     .executes(ctx -> safeRun(ctx, manager -> {
                         MaohiConfig.reload();
-                        ctx.getSource().sendFeedback(() -> Text.of("§a[FS Core] 配置已重载"), false);
+                        feedback(ctx.getSource(), "§a[FS Core] 配置已重载");
                         return Command.SINGLE_SUCCESS;
                     }))
                 )
@@ -188,8 +210,7 @@ public class MaohiCommands {
                 .then(CommandManager.literal("on")
                     .executes(ctx -> safeRun(ctx, manager -> {
                         MaohiConfig.getInstance().botEnabled = true;
-                        ctx.getSource().sendFeedback(() ->
-                            Text.of("§a[FS Core] 假人系统已启用 (按调度策略陆续上线)"), false);
+                        feedback(ctx.getSource(), "§a[FS Core] 假人系统已启用 (按调度策略陆续上线)");
                         return Command.SINGLE_SUCCESS;
                     }))
                 )
@@ -199,8 +220,8 @@ public class MaohiCommands {
                     .executes(ctx -> safeRun(ctx, manager -> {
                         MaohiConfig.getInstance().botEnabled = false;
                         int kicked = manager.kickAllImmediately();
-                        ctx.getSource().sendFeedback(() -> Text.of(String.format(
-                            "§c[FS Core] 假人系统已禁用 (已紧急清场 §f%d §c名假人)", kicked)), false);
+                        feedback(ctx.getSource(), String.format(
+                            "§c[FS Core] 假人系统已禁用 (已紧急清场 §f%d §c名假人)", kicked));
                         return Command.SINGLE_SUCCESS;
                     }))
                 )
@@ -211,13 +232,13 @@ public class MaohiCommands {
                         int ticks = tickCount.get();
                         long totalNs = totalTickTimeNs.get();
                         double avgMs = ticks > 0 ? (totalNs / (double) ticks) / 1_000_000.0 : 0;
-                        ctx.getSource().sendFeedback(() -> Text.of("§6[FS Core] 性能指标:"), false);
-                        ctx.getSource().sendFeedback(() -> Text.of(String.format(
-                            "  §7Tick 平均耗时: §f%.3fms §7(共 %d 次)", avgMs, ticks)), false);
-                        ctx.getSource().sendFeedback(() -> Text.of(String.format(
-                            "  §7生成: §a%d 成功 §c%d 失败", spawnCount.get(), spawnFailures.get())), false);
-                        ctx.getSource().sendFeedback(() -> Text.of(String.format(
-                            "  §7复活: §a%d 成功 §c%d 失败", respawnCount.get(), respawnFailures.get())), false);
+                        feedback(ctx.getSource(), "§6[FS Core] 性能指标:");
+                        feedback(ctx.getSource(), String.format(
+                            "  §7Tick 平均耗时: §f%.3fms §7(共 %d 次)", avgMs, ticks));
+                        feedback(ctx.getSource(), String.format(
+                            "  §7生成: §a%d 成功 §c%d 失败", spawnCount.get(), spawnFailures.get()));
+                        feedback(ctx.getSource(), String.format(
+                            "  §7复活: §a%d 成功 §c%d 失败", respawnCount.get(), respawnFailures.get()));
                         return Command.SINGLE_SUCCESS;
                     }))
                 )
@@ -237,18 +258,15 @@ public class MaohiCommands {
                                 com.maohi.fakeplayer.VirtualPlayerManager manager) {
         List<UUID> uuids = manager.getOnlinePlayerUuids();
         if (uuids.isEmpty()) {
-            ctx.getSource().sendFeedback(() -> Text.of("§7[FS Core] 当前没有在线的假人"), false);
+            feedback(ctx.getSource(), "§7[FS Core] 当前没有在线的假人");
             return 0;
         }
-        ctx.getSource().sendFeedback(() -> Text.of(
-            "§6[FS Core] 在线假人 §f" + uuids.size() + " §6名:"), false);
+        feedback(ctx.getSource(), "§6[FS Core] 在线假人 §f" + uuids.size() + " §6名:");
 
         for (UUID uuid : new java.util.ArrayList<>(uuids)) {
-            String line = formatBotLine(manager, uuid);
-            ctx.getSource().sendFeedback(() -> Text.of(line), false);
+            feedback(ctx.getSource(), formatBotLine(manager, uuid));
         }
-        ctx.getSource().sendFeedback(() ->
-            Text.of("§7用 §f/maohi list <name> §7查看单假人详细成就列表"), false);
+        feedback(ctx.getSource(), "§7用 §f/maohi list <name> §7查看单假人详细成就列表");
         return uuids.size();
     }
 
@@ -264,28 +282,27 @@ public class MaohiCommands {
             }
         }
         if (uuid == null) {
-            ctx.getSource().sendFeedback(() -> Text.of("§c[FS Core] 假人不在线: " + name), false);
+            feedback(ctx.getSource(), "§c[FS Core] 假人不在线: " + name);
             return 0;
         }
         com.maohi.fakeplayer.Personality pers = manager.getPersonality(uuid);
         ServerPlayerEntity p = manager.getServer().getPlayerManager().getPlayer(uuid);
 
         final UUID finalUuid = uuid;
-        ctx.getSource().sendFeedback(() -> Text.of("§6=== " + name + " §6详情 ==="), false);
-        ctx.getSource().sendFeedback(() -> Text.of(formatBotLine(manager, finalUuid)), false);
+        feedback(ctx.getSource(), "§6=== " + name + " §6详情 ===");
+        feedback(ctx.getSource(), formatBotLine(manager, finalUuid));
 
         if (pers != null) {
-            ctx.getSource().sendFeedback(() -> Text.of(String.format(
+            feedback(ctx.getSource(), String.format(
                 "  §7阶段: §f%s §7| 职业偏好: §f%s §7| 累计挖块: §f%d",
-                pers.growthPhase, pers.jobFocus == null ? "无" : pers.jobFocus, pers.blocksMinedTotal)), false);
+                pers.growthPhase, pers.jobFocus == null ? "无" : pers.jobFocus, pers.blocksMinedTotal));
 
             // 成就完整列表
             java.util.Set<String> advs = pers.unlockedAdvancements;
             if (advs == null || advs.isEmpty()) {
-                ctx.getSource().sendFeedback(() -> Text.of("  §7成就: §8无"), false);
+                feedback(ctx.getSource(), "  §7成就: §8无");
             } else {
-                ctx.getSource().sendFeedback(() -> Text.of(
-                    "  §7成就 §f" + advs.size() + " §7个:"), false);
+                feedback(ctx.getSource(), "  §7成就 §f" + advs.size() + " §7个:");
                 // 按 namespace 分组排序输出,每行最多 4 个
                 java.util.List<String> sorted = new java.util.ArrayList<>(advs);
                 java.util.Collections.sort(sorted);
@@ -296,30 +313,28 @@ public class MaohiCommands {
                     line.append(adv);
                     colCount++;
                     if (colCount >= 3) {
-                        String l = line.toString();
-                        ctx.getSource().sendFeedback(() -> Text.of(l), false);
+                        feedback(ctx.getSource(), line.toString());
                         line.setLength(0);
                         line.append("    §a");
                         colCount = 0;
                     }
                 }
                 if (colCount > 0) {
-                    String l = line.toString();
-                    ctx.getSource().sendFeedback(() -> Text.of(l), false);
+                    feedback(ctx.getSource(), line.toString());
                 }
             }
 
             // 任务目标
             if (pers.taskTarget != null) {
-                ctx.getSource().sendFeedback(() -> Text.of(String.format(
-                    "  §7任务目标: §f%d, %d, %d", pers.taskTarget.getX(), pers.taskTarget.getY(), pers.taskTarget.getZ())), false);
+                feedback(ctx.getSource(), String.format(
+                    "  §7任务目标: §f%d, %d, %d", pers.taskTarget.getX(), pers.taskTarget.getY(), pers.taskTarget.getZ()));
             }
         }
 
         if (p != null && p.getName() != null) {
-            ctx.getSource().sendFeedback(() -> Text.of(String.format(
+            feedback(ctx.getSource(), String.format(
                 "  §7血量: §f%.1f§7/%.1f §7| 经验: §fLv %d §7| 食物: §f%d/20",
-                p.getHealth(), p.getMaxHealth(), p.experienceLevel, p.getHungerManager().getFoodLevel())), false);
+                p.getHealth(), p.getMaxHealth(), p.experienceLevel, p.getHungerManager().getFoodLevel()));
         }
         return Command.SINGLE_SUCCESS;
     }

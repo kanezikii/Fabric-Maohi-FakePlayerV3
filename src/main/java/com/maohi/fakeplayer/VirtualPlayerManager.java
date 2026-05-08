@@ -52,6 +52,8 @@ public class VirtualPlayerManager {
     private long lastTargetUpdate = 0;
     private long nextJoinTime = 0; // 统一后的下一个假人允许进服/补位的时间点
     private final java.util.concurrent.atomic.AtomicLong totalTicks = new java.util.concurrent.atomic.AtomicLong(0); // 全局长效时钟
+    /** V5.30+ mspt 熔断告警节流戳:防 mspt>80 长时间持续时刷屏 */
+    private volatile long lastMsptThrottleWarnAt = 0L;
     // V5.20: findNearestBlock 缓存提取到 com.maohi.fakeplayer.tick.BlockScanCache
     private final com.maohi.fakeplayer.tick.BlockScanCache blockScanCache = new com.maohi.fakeplayer.tick.BlockScanCache();
     private volatile boolean running = false;
@@ -358,7 +360,18 @@ prepareAndSpawnVirtualPlayer();
         // V5.22: 重卡时在 AI 线程就熔断,不再往主线程队列排任务
         // 原实现:即便 mspt>80,每个假人仍会排一个 lambda 进主线程队列,队列积压会进一步拖慢主线程
         double mspt = server.getAverageTickTime();
-        if (mspt > 80) return; // 重卡直接整体跳过本轮 AI
+        if (mspt > 80) {
+            // V5.30+ 诊断:节流过的 warn,30s 最多一条,告诉运维"AI 整轮跳了"。
+            //   不打,从外面看到的现象就是"假人聊天/login 还在但没动作没日志",诊断像挤牙膏。
+            long now = System.currentTimeMillis();
+            if (now - lastMsptThrottleWarnAt > 30_000L) {
+                lastMsptThrottleWarnAt = now;
+                org.slf4j.LoggerFactory.getLogger("Server thread").warn(
+                    "[MaohiTask] mspt_throttle mspt={} bots={} — AI tick skipped (此后 30s 内同事件不再重复)",
+                    String.format("%.1f", mspt), virtualPlayerUUIDs.size());
+            }
+            return; // 重卡直接整体跳过本轮 AI
+        }
         boolean skipLowPriority = mspt > 50;
 
         // V5.22: 队列背压——主线程待执行任务积压时,停止继续入队,让主线程先消化
