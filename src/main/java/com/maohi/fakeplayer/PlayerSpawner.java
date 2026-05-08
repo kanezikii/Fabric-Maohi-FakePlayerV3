@@ -262,7 +262,7 @@ public class PlayerSpawner {
      * (mojmap 叫 SPAWN_RADIUS)。
      */
     private static int readSpawnRadius(net.minecraft.server.MinecraftServer server, net.minecraft.server.world.ServerWorld world) {
-        return world.getGameRules().getInt(net.minecraft.world.rule.GameRules.RESPAWN_RADIUS);
+        return world.getGameRules().getValue(net.minecraft.world.rule.GameRules.RESPAWN_RADIUS);
     }
 
     /**
