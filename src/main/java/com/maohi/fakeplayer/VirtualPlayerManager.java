@@ -232,6 +232,10 @@ public class VirtualPlayerManager {
                                 }
 
                                 // V3.2: 判断是到达目标还是遇到死路（使用快照，避免 NPE）
+                                // V5.42 合成豁免:CRAFTING 期间 bot 被 stop() 停住是正常的,
+                                //   不能在这里判定卡死,否则每 tick 触发 blocked_no_path 死循环。
+                                if (personality.currentTask == TaskType.CRAFTING) return;
+
                                 double distToTarget = p.getBlockPos().getSquaredDistance(snapshotTarget);
                                 if (distToTarget <= 16.0) {
                                     // V3.3: 到达工作范围内 (<=4格) — 不清任务，停下脚步交给状态机处理
@@ -1519,6 +1523,11 @@ prepareAndSpawnVirtualPlayer();
     }
 
     private void handleMoveBlocked(ServerPlayerEntity p, Personality personality) {
+        // V5.42 合成豁免:CRAFTING 期间 MovementInputHelper.stop 主动让 bot 原地停步,
+        //   这是预期行为。若不豁免,每 tick 的移动阻塞检测会把「原地不动」误判为卡死,
+        //   触发 blocked_no_path → craft_fail → 立刻重试 → 每秒几十次死循环 → MSPT 爆炸。
+        if (personality.currentTask == TaskType.CRAFTING) return;
+
         // V3.2: 到达目标点时，如果有待执行的床交互，先交互再清任务
         if (personality.pendingBedInteraction != null) {
             com.maohi.fakeplayer.social.EnvironmentSensor.interactBedAt(p, personality.pendingBedInteraction);
