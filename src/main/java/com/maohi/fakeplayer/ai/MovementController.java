@@ -458,6 +458,17 @@ public class MovementController {
 		pers.lastStuckSampleZ = pos.z;
 		pers.lastStuckSampleY = pos.y;
 
+		// P2: 静态任务豁免 stuck 判定。正在合成、或正在执行方块摆放状态机时，物理位移必然为 0，
+		//     不应累加 stuckTicks，防止被误判卡死而踢出。
+		if (pers.currentTask == com.maohi.fakeplayer.TaskType.CRAFTING
+			|| pers.tablePlaceStage > 0
+			|| pers.furnacePlaceStage > 0
+			|| pers.torchPlaceStage > 0) {
+			pers.stuckTicks = 0;
+			pers.stuckEscalation = 0;
+			return false;
+		}
+
 		// 0.05² = 0.0025;每 tick 实际位移 < 0.05 视为"未移动"。vanilla 走路 ~0.2 格/tick,
 		//   就算 STONE_AGE 慢速 bot 也 > 0.05 → 阈值足够灵敏区分"在走"vs"卡死"。
 		if (movedSq >= 0.0025) {

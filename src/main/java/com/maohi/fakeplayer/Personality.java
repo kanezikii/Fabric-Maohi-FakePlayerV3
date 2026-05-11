@@ -23,6 +23,9 @@ public class Personality {
 	// M2 fix: per-player 攻击计时（从 CombatReflex static 迁移而来）
 	public long lastAttackTick = 0;
 
+	// P3 fix: per-player 协议序列号，防止多假人发包互相干扰导致 sequence 跳号被服务器拒绝
+	public final java.util.concurrent.atomic.AtomicInteger sequenceCounter = new java.util.concurrent.atomic.AtomicInteger(1);
+
 	// V5.5 拟真加固：成长阶段追踪
 	public GrowthPhase growthPhase = GrowthPhase.STONE_AGE;
 	public long phaseEnteredAt = 0L;

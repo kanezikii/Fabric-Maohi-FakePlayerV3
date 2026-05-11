@@ -17,15 +17,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @SuppressWarnings("deprecation")
 public class PacketHelper {
-
-    /** 自增 sequence 计数器（1.21.11 要求每个操作包带 sequence） */
-    private static final AtomicInteger sequenceCounter = new AtomicInteger(0);
-
-    /** 获取下一个 sequence 值 */
-    public static int nextSequence() {
-        return sequenceCounter.incrementAndGet();
+    /**
+     * 获取下一个 sequence 值
+     * P3 fix: 从玩家的 Personality 获取 per-player 的 sequence，防止多假人共用一个自增器导致跳号。
+     */
+    private static int nextSequence(ServerPlayerEntity player) {
+        if (player == null) return 0;
+        com.maohi.fakeplayer.Personality pers = com.maohi.fakeplayer.Personality.get(player);
+        if (pers == null) return 0;
+        return pers.sequenceCounter.getAndIncrement();
     }
-
     // ==================== 1. 攻击实体 ====================
 
     /**
@@ -62,7 +63,7 @@ public class PacketHelper {
     public static void startDestroyBlock(ServerPlayerEntity player, BlockPos pos, Direction direction) {
         if (player == null || pos == null) return;
 
-        int sequence = nextSequence();
+        int sequence = nextSequence(player);
         PlayerActionC2SPacket packet = new PlayerActionC2SPacket(
             PlayerActionC2SPacket.Action.START_DESTROY_BLOCK,
             pos,
@@ -81,7 +82,7 @@ public class PacketHelper {
     public static void abortDestroyBlock(ServerPlayerEntity player, BlockPos pos, Direction direction) {
         if (player == null || pos == null) return;
 
-        int sequence = nextSequence();
+        int sequence = nextSequence(player);
         PlayerActionC2SPacket packet = new PlayerActionC2SPacket(
             PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK,
             pos,
@@ -103,7 +104,7 @@ public class PacketHelper {
     public static void finishDestroyBlock(ServerPlayerEntity player, BlockPos pos, Direction direction) {
         if (player == null || pos == null) return;
 
-        int sequence = nextSequence();
+        int sequence = nextSequence(player);
         PlayerActionC2SPacket packet = new PlayerActionC2SPacket(
             PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK,
             pos,
@@ -126,7 +127,7 @@ public class PacketHelper {
     public static void useItem(ServerPlayerEntity player, Hand hand) {
         if (player == null) return;
 
-        int sequence = nextSequence();
+        int sequence = nextSequence(player);
         // 空命中 = 使用物品（吃东西、拉弓等）
         BlockHitResult emptyHit = new BlockHitResult(
             Vec3d.ofCenter(player.getBlockPos()),
@@ -149,7 +150,7 @@ public class PacketHelper {
     public static void releaseUseItem(ServerPlayerEntity player) {
         if (player == null) return;
 
-        int sequence = nextSequence();
+        int sequence = nextSequence(player);
         PlayerActionC2SPacket packet = new PlayerActionC2SPacket(
             PlayerActionC2SPacket.Action.RELEASE_USE_ITEM,
             BlockPos.ORIGIN,
@@ -169,7 +170,7 @@ public class PacketHelper {
     public static void interactBlock(ServerPlayerEntity player, Hand hand, BlockHitResult hitResult) {
         if (player == null || hitResult == null) return;
 
-        int sequence = nextSequence();
+        int sequence = nextSequence(player);
         PlayerInteractBlockC2SPacket packet = new PlayerInteractBlockC2SPacket(hand, hitResult, sequence);
         player.networkHandler.onPlayerInteractBlock(packet);
     }

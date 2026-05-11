@@ -132,6 +132,9 @@ public class BlockPlacer {
 				resetTorchState(personality);
 				return;
 			}
+			// P0: 重发 setSelectedSlot 防止槽位漂移(stage 0 到 stage 1 的 3-6 tick 间隙中
+			//   挖矿/进食/合成台等其他行为可能调用 setSelectedSlot 换掉手持物品)。
+			PacketHelper.setSelectedSlot(player, personality.torchTargetSlot);
 			BlockHitResult hit = new BlockHitResult(
 				Vec3d.ofCenter(blockUnder).add(0, 0.5, 0),
 				Direction.UP,
@@ -200,7 +203,8 @@ public class BlockPlacer {
 		if (personality.currentTask != TaskType.IDLE
 			&& personality.currentTask != TaskType.MINING
 			&& personality.currentTask != TaskType.WOODCUTTING
-			&& personality.currentTask != TaskType.EXPLORING) {
+			&& personality.currentTask != TaskType.EXPLORING
+			&& personality.currentTask != TaskType.CRAFTING) {
 			diagReason = "task_state=" + personality.currentTask;
 		}
 		// GUI 阻断:任何容器/合成界面打开时都跳过(避免和 CraftingBehavior 抢 ClickSlot 节拍)
@@ -343,6 +347,11 @@ public class BlockPlacer {
 			player.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
 			player.setPitch((float) -Math.toDegrees(Math.atan2(dy, horizDist)));
 
+			// P0: 重发 setSelectedSlot 防止槽位漂移。
+			//   stage 0→1 的 3-6 tick 间隙中,挖矿切镐/火把切槽/进食等行为可能调用
+			//   setSelectedSlot 换掉手持物品。onPlayerInteractBlock 用 getStackInHand(hand)
+			//   判定放什么方块——手里不是合成台就静默失败,item 留在背包,下次循环重复。
+			PacketHelper.setSelectedSlot(player, personality.tableTargetSlot);
 			BlockHitResult hit = new BlockHitResult(hitCenter, face, support, false);
 			PacketHelper.interactBlock(player, Hand.MAIN_HAND, hit);
 			PacketHelper.swingHand(player, Hand.MAIN_HAND);
@@ -439,7 +448,8 @@ public class BlockPlacer {
 		if (personality.currentTask != TaskType.IDLE
 			&& personality.currentTask != TaskType.MINING
 			&& personality.currentTask != TaskType.WOODCUTTING
-			&& personality.currentTask != TaskType.EXPLORING) {
+			&& personality.currentTask != TaskType.EXPLORING
+			&& personality.currentTask != TaskType.CRAFTING) {
 			return;
 		}
 		if (player.currentScreenHandler != player.playerScreenHandler) return;
@@ -521,6 +531,8 @@ public class BlockPlacer {
 			player.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
 			player.setPitch((float) -Math.toDegrees(Math.atan2(dy, horizDist)));
 
+			// P0: 重发 setSelectedSlot 防止槽位漂移(同 table 修复)。
+			PacketHelper.setSelectedSlot(player, personality.furnaceTargetSlot);
 			BlockHitResult hit = new BlockHitResult(hitCenter, face, support, false);
 			PacketHelper.interactBlock(player, Hand.MAIN_HAND, hit);
 			PacketHelper.swingHand(player, Hand.MAIN_HAND);
