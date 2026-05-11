@@ -348,16 +348,25 @@ public class BlockPlacer {
 			player.setPitch((float) -Math.toDegrees(Math.atan2(dy, horizDist)));
 
 			// P0: 重发 setSelectedSlot 防止槽位漂移。
-			//   stage 0→1 的 3-6 tick 间隙中,挖矿切镐/火把切槽/进食等行为可能调用
-			//   setSelectedSlot 换掉手持物品。onPlayerInteractBlock 用 getStackInHand(hand)
-			//   判定放什么方块——手里不是合成台就静默失败,item 留在背包,下次循环重复。
 			PacketHelper.setSelectedSlot(player, personality.tableTargetSlot);
 			BlockHitResult hit = new BlockHitResult(hitCenter, face, support, false);
-			PacketHelper.interactBlock(player, Hand.MAIN_HAND, hit);
+
+			// P5 诊断：绕过网络包，直接调用 interactionManager 确认放置结果。
+			//   如果 interactionManager 返回 SUCCESS 但方块没出现 → 后续有东西撤销了放置。
+			//   如果 interactionManager 返回 FAIL/PASS → 放置本身被服务器拒绝，需看具体原因。
+			ItemStack handStack = player.getStackInHand(Hand.MAIN_HAND);
+			net.minecraft.util.ActionResult result = player.interactionManager.interactBlock(
+				player, player.getEntityWorld(), handStack, Hand.MAIN_HAND, hit);
 			PacketHelper.swingHand(player, Hand.MAIN_HAND);
-			// planA P-1 诊断:interactBlock 已发,server 后续落地。这里只确认"已发包"。
+
+			// 诊断：检查放置后目标位置的方块状态
+			net.minecraft.block.BlockState afterState = player.getEntityWorld().getBlockState(placeAt);
 			com.maohi.fakeplayer.TaskLogger.log(player, "table_place_sent",
-				"pos", placeAt, "support", support);
+				"pos", placeAt, "support", support,
+				"result", result.toString(),
+				"afterBlock", afterState.getBlock().toString(),
+				"handItem", handStack.getItem().toString(),
+				"selectedSlot", ((PlayerInventoryAccessor) player.getInventory()).getSelectedSlot());
 
 			personality.tableRestoreAtTick = now + RESTORE_DELAY_MIN
 				+ ThreadLocalRandom.current().nextInt(RESTORE_DELAY_MAX - RESTORE_DELAY_MIN + 1);
