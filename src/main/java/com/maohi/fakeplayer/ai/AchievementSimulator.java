@@ -35,8 +35,14 @@ public final class AchievementSimulator {
 	/**
 	 * 5 个里程碑成就 ID，用于 phase 系统和 chat 叙事时索引。
 	 * 这些成就由 vanilla 完全控制触发条件，本类只负责观察。
+	 *
+	 * P17: 首项加 story/mine_wood — 这是 vanilla 玩家上手第一个 advancement(获得木头),
+	 *   也是 bot 完成 STONE_AGE 第一个 milestone。原列表缺它直接导致 metrics ach=0,
+	 *   即使 P11 (VPM mine_done 路径) 强制 grantCriterion 了也 sync 不进 personality,
+	 *   外部观察口径"bot 没拿到任何成就"假象。
 	 */
 	public static final String[] ADV_SEQUENCE = {
+		"story/mine_wood",
 		"story/mine_stone",
 		"story/upgrade_tools",
 		"story/smelt_iron",
