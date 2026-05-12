@@ -288,12 +288,17 @@ public class PlayerSpawner {
         if (radius <= 0) return base;
         java.util.concurrent.ThreadLocalRandom rng = java.util.concurrent.ThreadLocalRandom.current();
 
-        // P12: 限制同步 chunk 加载次数，防止主线程卡顿 3-4 秒触发 'Can't keep up!'。
-        //   原实现 50 次循环每次都 force=true 同步加载 chunk，单次 100-300ms，
-        //   连续 spawn 多个假人时累计耗时轻松超过 3000ms → 73+ ticks behind。
-        //   策略：前 3 次允许同步加载（保证至少有可用 chunk），之后只查已加载的 chunk。
-        //   已加载 chunk 查询 O(1)，不阻塞主线程。
-        int syncLoadsRemaining = 3;
+        // P15: 完全关闭同步 chunk 加载,避免单次 spawn 触发 main thread 卡顿 (2~3s/171 ticks)。
+        //   P12 (commit ae9b33e) 把次数限到 3 次,实测仍有 2216ms lag (44 ticks behind)。
+        //   单次 force=true chunk gen/load 在 server thread 上可能耗 500~1000ms,3 次就 >2s。
+        //   现在策略:只用 isChunkLoaded() 查 O(1) 已加载 chunk。
+        //   - 配合 VPM.start() 的 30s grace period,vanilla spawn-chunk ticket 系统已经把
+        //     spawnRadius 内 chunk 全部加载完(spawn chunks 是 vanilla 的 forced loaded 区域),
+        //     50 次 attempt 大概率第一次就命中。
+        //   - 即便 radius 跑出加载区(spawnRadius gamerule 默认 10 块半径,不超出 forced 区),
+        //     50 次未命中后走 fallback (line 343),fallback 自身的 getSafeSpawnY 在未加载 chunk
+        //     上会返回 fallbackY 默认值,bot 位置仍可用(只是 Y 可能不准,vanilla 物理会自校正)。
+        int syncLoadsRemaining = 0;
 
         for (int attempt = 0; attempt < 50; attempt++) {
             double angle = rng.nextDouble() * Math.PI * 2.0;
