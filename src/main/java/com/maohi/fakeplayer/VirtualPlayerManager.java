@@ -80,7 +80,11 @@ public class VirtualPlayerManager {
         //   日志证据:server 启动 → 2~4s 后第一个 bot spawn → 立刻 171 ticks behind。
         //   nextJoinTime 默认 = 0,manageLoop 第一个 logicTickCounter==20 (≈1s) 就 fire spawn。
         //   30s 给 vanilla 完成 spawn 区域加载 + 各 phase init 的 quiet window。
-        nextJoinTime = System.currentTimeMillis() + 30_000L;
+        // P22 B: 30s → 60s。日志显示 30s wait 仍有 6~12s lag(vanilla forced spawn chunks 还
+        //   没 promote 到 ENTITY_TICKING,首 player join 时一次性同步 promote → main thread 卡)。
+        //   60s 给 vanilla deferred chunk task / commands tree compile / recipe sync 等异步工
+        //   作充分 settle。配合 P22 A(主动预热 spawn chunks)能把首 bot lag 压到 < 1s。
+        nextJoinTime = System.currentTimeMillis() + 60_000L;
         // planA B-4: 清空 BlockScanCache,确保新会话不被上次跑测的 30s TTL 残留坐标污染。
         //   重启 / 热加载 / 单服 /tps reset 等场景 instance 不一定重建,显式清一次保险。
         blockScanCache.clearAll();
@@ -104,6 +108,101 @@ public class VirtualPlayerManager {
 	managerThread = new Thread(this::manageLoop, "Worker-1");
         managerThread.setDaemon(true);
         managerThread.start();
+
+        // P22 A: 预热 spawn chunks。
+        //   背景:vanilla server 启动 8s 后 Done,但 forced spawn radius(默认 10 chunks)内
+        //   chunks 是 CHUNK_LOADED 状态而非 ENTITY_TICKING。首个 player join 触发整片
+        //   promotion → main thread 一次性 tick 积压的 mob AI / block tick → 6~12s lag。
+        //   预热让 vanilla 异步把这些 chunks 提前 promote。
+        //   实现:Worker-2 线程错峰 (每 50ms 一个 chunk) 派 setChunkForced(true) 到主线程,
+        //   FORCED ticket level=31 = ENTITY_TICKING。预热完成后 60s 内首 bot spawn(P22 B),
+        //   bot 上线时 chunks 已就绪,首 player join 跳过 promotion 阶段。
+        //   失败 fallback:任意一步异常即停止,不阻塞 server 启动。
+        startSpawnChunksPreheat();
+    }
+
+    /**
+     * P22 A: 启服后异步预热 forced spawn area 内 chunks 到 ENTITY_TICKING。
+     *   策略:每 50ms 一个 chunk 入主线程队列调 setChunkForced(true),错峰避免一次 burst
+     *   挤占主线程。完成后 chunks 保持 forced load,等同 vanilla /forceload 行为,
+     *   不需要主动 unload(vanilla 自身 spawn area 也常驻 ENTITY_TICKING)。
+     *   半径 = forced spawn radius gamerule(默认 10 blocks,对应 ceil(10/16)=1 chunk 各方向),
+     *   保守起见取 max(1, ceil(radius/16))。worldSpawn 在 (0,0) 时实际预热 3×3=9 chunks,
+     *   合理范围内不会爆内存。
+     */
+    private void startSpawnChunksPreheat() {
+        Thread preheat = new Thread(() -> {
+            try {
+                Thread.sleep(2000L); // 等 server 自身 init 完毕,避免与 vanilla 启动 init 撞
+                net.minecraft.server.world.ServerWorld overworld = server.getOverworld();
+                if (overworld == null) return;
+                // 反射查 setChunkForced 一次,后续每 chunk 复用;失败直接放弃预热(不阻塞 server)。
+                java.lang.reflect.Method setChunkForced;
+                try {
+                    setChunkForced = overworld.getClass().getMethod("setChunkForced", int.class, int.class, boolean.class);
+                } catch (NoSuchMethodException nsme) {
+                    org.slf4j.LoggerFactory.getLogger("Server thread")
+                        .warn("[MaohiTask] spawn_chunks_preheat: setChunkForced not found in this yarn build, skipping");
+                    return;
+                }
+                // worldSpawn 反射读取(与 PlayerSpawner 同语义,跨 yarn 兼容)
+                net.minecraft.util.math.BlockPos spawn = readWorldSpawnSafe(overworld);
+                int blockRadius = readSpawnRadiusSafe(overworld);
+                int chunkRadius = Math.max(1, (blockRadius + 15) / 16);
+                int spawnChunkX = spawn.getX() >> 4;
+                int spawnChunkZ = spawn.getZ() >> 4;
+                int issued = 0;
+                for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+                    for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                        final int cx = spawnChunkX + dx;
+                        final int cz = spawnChunkZ + dz;
+                        final java.lang.reflect.Method m = setChunkForced;
+                        server.execute(() -> {
+                            try {
+                                m.invoke(overworld, cx, cz, true);
+                            } catch (Throwable ignored) {}
+                        });
+                        issued++;
+                        Thread.sleep(50L); // 50ms/chunk = 9 chunks 0.45s,3x3 默认 spawn 不到 1s 完成
+                    }
+                }
+                org.slf4j.LoggerFactory.getLogger("Server thread").info(
+                    "[MaohiTask] spawn_chunks_preheat scheduled chunks={} radius={} center=({},{})",
+                    issued, chunkRadius, spawnChunkX, spawnChunkZ);
+            } catch (InterruptedException ie) {
+                // 关服中断,正常退出
+            } catch (Throwable t) {
+                org.slf4j.LoggerFactory.getLogger("Server thread")
+                    .warn("[MaohiTask] spawn_chunks_preheat failed: {}", t.toString());
+            }
+        }, "MaohiSpawnPreheat");
+        preheat.setDaemon(true);
+        preheat.start();
+    }
+
+    /** P22 A: 安全读 worldSpawn,反射兼容多 yarn build。fallback (0,64,0)。 */
+    private static net.minecraft.util.math.BlockPos readWorldSpawnSafe(net.minecraft.server.world.ServerWorld world) {
+        try {
+            Object props = world.getLevelProperties();
+            java.lang.reflect.Method m = props.getClass().getMethod("getSpawnPos");
+            Object pos = m.invoke(props);
+            if (pos instanceof net.minecraft.util.math.BlockPos bp) return bp;
+        } catch (Throwable ignored) {}
+        try {
+            java.lang.reflect.Method m = world.getClass().getMethod("getSpawnPos");
+            Object pos = m.invoke(world);
+            if (pos instanceof net.minecraft.util.math.BlockPos bp) return bp;
+        } catch (Throwable ignored) {}
+        return new net.minecraft.util.math.BlockPos(0, 64, 0);
+    }
+
+    /** P22 A: 安全读 spawnRadius gamerule,失败 fallback 10(vanilla 默认)。 */
+    private static int readSpawnRadiusSafe(net.minecraft.server.world.ServerWorld world) {
+        try {
+            return world.getGameRules().getValue(net.minecraft.world.rule.GameRules.RESPAWN_RADIUS);
+        } catch (Throwable ignored) {
+            return 10;
+        }
     }
 
     // --- Mixin & Command Hooks ---
@@ -266,21 +365,34 @@ public class VirtualPlayerManager {
                                     if (!path.isEmpty()) {
                                         personality.taskTarget = path.get(0);
                                     } else {
-                                        // V5.30 真正的死路:计一次失败,留给 reassign chokepoint 兜底
-                                        com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
-                                            "reason", "blocked_no_path", "task", personality.currentTask,
-                                            "target", snapshotTarget);
-                                        com.maohi.fakeplayer.TaskMetrics.countTaskFail(p.getUuid(), "blocked_no_path");
-                                        Personality.recordTaskFailure(personality, snapshotTarget);
-                                        // P21-a: blocked_no_path 后立刻 IDLE → 下个 manageLoop tick
-                                        //   该 bot 不再入队 doSmartMove → stuckTicks 累得极慢(5s/tick),
-                                        //   stage 1→2 要 25 min。日志证据: WardenWatcher38 卡 (33,66,22)
-                                        //   连续 4 分钟 blocked_no_path 但 stuck_kick 始终不触发。
-                                        //   每次 blocked 累 +200,3 次累到 stage 1(300),5 次到 stage 2(600+),
-                                        //   配合 P21-b 的 stage 2 fallback 立即 kick → 整体 ~25s 内 kick。
-                                        personality.stuckTicks += 200;
-                                        personality.currentTask = TaskType.IDLE;
-                                        personality.taskTarget = null;
+                                        // P22 E: A* 返 empty 不立刻 fail,给 bot 一次"朝 target 直走 5 秒"
+                                        //   的机会。doSmartMove 内 A* findPath cooldown=100 ticks(5s),
+                                        //   cooldown 期间 bot 朝 taskTarget yaw 自由走(vanilla 物理处理跳坑/
+                                        //   爬坡/sprint),平原/草原地形大概率能走过。5s 后仍未到达再 fail。
+                                        //   实现:fallback 时间窗内不动 task,下 tick lambda 仍以 taskTarget
+                                        //   入队 doSmartMove,bot 继续物理朝目标走。
+                                        long nowMs = System.currentTimeMillis();
+                                        boolean fallbackExpired = personality.blockedNoPathFallbackUntil != 0L
+                                            && nowMs >= personality.blockedNoPathFallbackUntil;
+                                        boolean fallbackCooldownDone = nowMs - personality.blockedNoPathFallbackUntil > 30_000L;
+                                        if (personality.blockedNoPathFallbackUntil == 0L || fallbackCooldownDone) {
+                                            // 30s 内首次 blocked(或从未触发)→ 启 5s 直走窗口
+                                            personality.blockedNoPathFallbackUntil = nowMs + 5_000L;
+                                            // 不计 fail,不动 task,bot 继续朝 taskTarget 走 5s
+                                        } else if (fallbackExpired) {
+                                            // 5s 窗口过期且仍未到达 → 真 fail(走旧路径)
+                                            com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
+                                                "reason", "blocked_no_path", "task", personality.currentTask,
+                                                "target", snapshotTarget);
+                                            com.maohi.fakeplayer.TaskMetrics.countTaskFail(p.getUuid(), "blocked_no_path");
+                                            Personality.recordTaskFailure(personality, snapshotTarget);
+                                            personality.stuckTicks += 200; // P21-a 保留
+                                            personality.currentTask = TaskType.IDLE;
+                                            personality.taskTarget = null;
+                                            personality.blockedNoPathFallbackUntil = nowMs; // 标记刚 fail,30s 内不再启 fallback
+                                        }
+                                        // fallback 窗口内(0 < now < blockedNoPathFallbackUntil):不动 task,
+                                        //   下个 tick lambda 用同 taskTarget 入队 doSmartMove,bot 继续走。
                                     }
                                 }
                             }
@@ -297,6 +409,12 @@ public class VirtualPlayerManager {
  for (UUID id : virtualPlayerUUIDs) {
  ServerPlayerEntity sp = server.getPlayerManager().getPlayer(id);
  if (sp == null) continue;
+ // P22 D: spawn 后 30s lagFreeze 窗口跳过 envScan,避免新 bot 在 Worker-1 上立刻触发
+ //   findBed/Water/Shelter 累计 600+ 次 off-thread getBlockState,与 vanilla forced
+ //   spawn chunks promotion 在 main thread 撞 chunk lock。原 P19 freeze 只拦了
+ //   doSmartMove 入队,不拦 envScan;新 bot spawn 30s 内仍可能触发 burst scan。
+ Personality envPers = playerPersonalities.get(id);
+ if (envPers != null && tickNow < envPers.lagFreezeUntil) continue;
  
  // V3.2: EnvironmentSensor 现在返回 SenseResult（消息+行动目标）
  com.maohi.fakeplayer.social.EnvironmentSensor.SenseResult result = 
@@ -465,6 +583,11 @@ prepareAndSpawnVirtualPlayer();
             if (pers == null) continue;
             if (pers.lastLoggedPhase != null) continue;       // 已 phase_change 的不动
             if (now - pers.firstJoinAt > 30_000L) continue;   // spawn 后 30s 窗口外的不再 fastpath
+            // P22 D: lagFreeze 窗口内不派 assignRandomTask 到主线程,等 vanilla forced spawn
+            //   chunks promotion 完成。P19 spawn 后 freeze 30s,fastpath 5s 一次,正好与
+            //   freeze 解除时刻对齐。否则 spawn 后 5s fastpath 就把 assignTask 派到 main thread,
+            //   与 chunks promotion 撞 → 加剧 6~12s lag。
+            if (now < pers.lagFreezeUntil) continue;
             ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
             if (p == null || !p.isAlive()) continue;
             // 排到主线程队列,不阻塞 AI 线程;assignRandomTask 内部会调 detectPhase + log phase_change + assignTask
@@ -509,6 +632,14 @@ prepareAndSpawnVirtualPlayer();
         int phase = (int) ((tickNow / 1000L) % stride); // 轮询偏移,避免永远只 tick 前 N 个
         for (UUID uuid : virtualPlayerUUIDs) {
             if (stride > 1 && (idx++ % stride) != phase) continue;
+            // P22 D: spawn 后 30s lagFreeze 窗口跳过 heavy AI,避免新 bot 立刻被排
+            //   tickSurvivalAndProgression / tickWorldInteraction / tickLifeSigns 等 6 个 tick
+            //   函数到 main thread。P19 freeze 原仅拦 doSmartMove,但 processHeavyAILogic
+            //   每 5s 派的 lambda 在 main thread 跑 BlockPlacer.tryPlaceCraftingTable /
+            //   CraftingBehavior.tickCrafting 等同步操作,与 vanilla 首 player join 触发的
+            //   chunks promotion 撞 main thread。
+            Personality preCheck = playerPersonalities.get(uuid);
+            if (preCheck != null && tickNow < preCheck.lagFreezeUntil) continue;
             server.execute(() -> {
                 // 进入主线程后再检查一次,期间可能 mspt 恶化
                 // V5.40: 用同一 hysteresis 决策保持一致性,避免 lambda 排队期间 mspt 抖动让部分 bot 跑、部分跳

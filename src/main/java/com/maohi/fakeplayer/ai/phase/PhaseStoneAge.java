@@ -42,8 +42,11 @@ public final class PhaseStoneAge implements Phase {
 
     private PhaseStoneAge() {}
 
-    /** V5.28.6 P2-Scan: 石器时代探索半径 */
-    private static final int EXPLORE_RADIUS = 40;
+    /** V5.28.6 P2-Scan: 石器时代探索半径
+     *  P22 I: 40 → 30。setExplore 选 30~36 格 target 在 A* 2048 节点覆盖内(P22 G 修复),
+     *  让 bot 真有路径走到,而不是反复 blocked_no_path。远征交给 force_explore cap=80。
+     */
+    private static final int EXPLORE_RADIUS = 30;
 
     /** WOOD_START → WOOD_CRAFT 的 log 当量阈值。
      *  vanilla 推链需要:1 log → 4 planks(table) + ≥1 log → 4 planks(stick+wood pickaxe),
@@ -235,12 +238,15 @@ public final class PhaseStoneAge implements Phase {
             //   日志证据(2026-05-10 log):5 个 bot 全盯 (11, 76~79, -2),Starforged48 距离 9 格,
             //     4 次 120s WOODCUTTING 全 fail —— 经典"挖不到树顶"指纹。
             target = snapToTreeBase(player.getEntityWorld(), target);
-            // V5.43.4: snapToTreeBase 后 y-diff 仍 > 8 → 山顶树 / 悬空树,bot 在山脚永远走不到。
+            // V5.43.4: snapToTreeBase 后 y-diff 仍 > 12 → 山顶树 / 悬空树,bot 在山脚永远走不到。
             //   日志证据(commit 7648837):DragonGhost (0.5,64,0.5) 反复 EXPLORING target=(13,80,5),
             //     y 差 16,7 次 task_fail 跨 8 分钟 — doSmartMove 到 xz=0 时算"到达" → stop。
             //   双重防御(配 MovementController.doSmartMove 的 y-diff 检查):findLog 时直接
             //     拒绝高 y 候选,加入 failedTargets 60s 黑名单 + markRegionScanEmpty,逼 bot setExplore 离开。
-            if (Math.abs(target.getY() - player.getBlockY()) > 8) {
+            // P22 F: 阈值 8 → 12。snapToTreeBase 后山地/丘陵树根 y 可能仍 9~12 格高,原 8 过严
+            //   把大量可达树拒掉 → STONE_AGE 0 进度。12 仍卡死真正不可达的山顶树/树梢(≥13 格)。
+            //   vanilla 跳 1 + 2 格无伤坠 + 短爬坡组合够走 12 格 y-diff。
+            if (Math.abs(target.getY() - player.getBlockY()) > 12) {
                 p.failedTargets.put(target, System.currentTimeMillis() + 60_000L);
                 Personality.markRegionScanEmpty(p, player.getBlockPos());
                 setExplore(p, player);
@@ -271,9 +277,10 @@ public final class PhaseStoneAge implements Phase {
         if (target == null) target = scanDownForStone(player);
         if (target != null) {
             // V5.43.4: 同 assignChopTree —— ctx.findStone(BlockScanCache 32 格 + ±2 Y 扫)
-            //   理论上不会命中远高目标,但裸石/裂石/深板岩在山体侧面/悬崖时仍可能给出 y-diff > 8。
+            //   理论上不会命中远高目标,但裸石/裂石/深板岩在山体侧面/悬崖时仍可能给出 y-diff > 12。
             //   scanDownForStone 自身锁定 -1~-8 dy,永远通过这层过滤。
-            if (Math.abs(target.getY() - player.getBlockY()) > 8) {
+            // P22 F: 阈值 8 → 12,与 assignChopTree 同步放宽。
+            if (Math.abs(target.getY() - player.getBlockY()) > 12) {
                 p.failedTargets.put(target, System.currentTimeMillis() + 60_000L);
                 Personality.markRegionScanEmpty(p, player.getBlockPos());
                 setExplore(p, player);
@@ -388,7 +395,9 @@ public final class PhaseStoneAge implements Phase {
             double rad = Math.toRadians(player.getYaw() + offsetDeg);
             
             // 后续尝试扩大搜索半径，强迫走出空旷地带
-            double multiplier = 1.0 + (attempt / 3) * 0.5;
+            // P22 I: 倍率 0.5 → 0.2(最大 1.2×),整体最远 30 × 1.2 × 1.0 = 36 格,
+            //   保持在 A* 2048 节点覆盖范围内,避免 setExplore 选不可达 target → 死循环。
+            double multiplier = 1.0 + (attempt / 3) * 0.2;
             double dist = EXPLORE_RADIUS * multiplier * (0.85 + rng.nextDouble() * 0.15); // 0.85~1.0 半径,贴外圈
             
             int dx = (int) Math.round(-Math.sin(rad) * dist);

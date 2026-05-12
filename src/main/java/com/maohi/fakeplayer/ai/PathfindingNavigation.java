@@ -36,7 +36,11 @@ public class PathfindingNavigation {
 	// V5.40 64 → 512:64 节点只够 ~8 格直线;森林环境绕 1~2 棵树就溢出 → path 返空 →
 	// MovementController 5s 冷却内直线撞树叶 → expire。512 节点能覆盖 ~22 格半径任意拓扑,
 	// worst-case 单次 ~1ms,5s 缓存摊销;100 bot 同时 worst-case 也只 ~100ms 不重叠。
-	private static final int MAX_SEARCH_STEPS = 512;
+	// P22 G: 512 → 2048。STONE_AGE bot 常需走 40~60 格找树/石(EXPLORE_RADIUS=30~36 配合
+	//   force_explore cap=80),22 格半径覆盖不到 → A* 永远 empty → blocked_no_path 死循环。
+	//   2048 节点覆盖 ~45 格半径,匹配 setExplore 实际距离。worst-case 单次 ~4ms,5s cache
+	//   + wall-clock 错峰摊销实际峰值 << 100ms。
+	private static final int MAX_SEARCH_STEPS = 2048;
 
 	/** 路径缓存 TTL */
 	private static final long PATH_CACHE_TTL_NS = 5_000_000_000L; // 5 秒

@@ -52,7 +52,7 @@ public class EnvironmentSensor {
 		if (world.isRaining() && world.isSkyVisible(player.getBlockPos())) {
 			if (r.nextInt(100) < 5) {
 				// 吐槽 + 可能同时行动
-				BlockPos shelter = findShelter(player);
+				BlockPos shelter = findShelterThrottled(player, pers);
 				if (shelter != null) {
 					return SenseResult.chatAndAction(VocabularyBank.getRainComplaint(pers), shelter, false, "rain");
 				}
@@ -60,7 +60,7 @@ public class EnvironmentSensor {
 			}
 			// 即使不吐槽,也有 3% 概率找避雨处
 			if (r.nextInt(100) < 3) {
-				BlockPos shelter = findShelter(player);
+				BlockPos shelter = findShelterThrottled(player, pers);
 				if (shelter != null) {
 					return SenseResult.action(shelter, false);
 				}
@@ -70,7 +70,7 @@ public class EnvironmentSensor {
 		// 2. 感知黑夜 → 吐槽 + 尝试找床睡觉
 		if (world.isNight() && world.isSkyVisible(player.getBlockPos())) {
 			if (r.nextInt(100) < 3) {
-				BlockPos bed = findBed(player);
+				BlockPos bed = findBedThrottled(player, pers);
 				if (bed != null) {
 					return SenseResult.chatAndAction(VocabularyBank.getNightComplaint(pers), bed, true, "night");
 				}
@@ -78,7 +78,7 @@ public class EnvironmentSensor {
 			}
 			// 不吐槽但可能找床
 			if (r.nextInt(100) < 2) {
-				BlockPos bed = findBed(player);
+				BlockPos bed = findBedThrottled(player, pers);
 				if (bed != null) {
 					return SenseResult.action(bed, true);
 				}
@@ -87,7 +87,7 @@ public class EnvironmentSensor {
 
 		// 3. 感知着火 → 吐槽 + 尝试找水(高优先级行动)
 		if (player.isOnFire()) {
-			BlockPos water = findWater(player);
+			BlockPos water = findWaterThrottled(player, pers);
 			if (water != null) {
 				// 着火时行动优先,30% 同时吐槽
 				if (r.nextInt(100) < 30) {
@@ -102,6 +102,34 @@ public class EnvironmentSensor {
 		}
 
 		return SenseResult.none();
+	}
+
+	/**
+	 * P22 C: per-bot 60s 节流的 shelter 查询。findShelter 在 Worker-1 上跑 105 次
+	 *   off-thread getBlockState,多 bot 同 tick 命中下雨时与 main thread chunk lock 撞。
+	 *   60s 内 shelter 几何不变(雨天 bot 站着不动地形稳定),节流后单 bot 同事件不重复扫。
+	 */
+	private static BlockPos findShelterThrottled(ServerPlayerEntity player, com.maohi.fakeplayer.Personality pers) {
+		long nowMs = System.currentTimeMillis();
+		if (pers != null && nowMs - pers.lastShelterScanAt < 60_000L) return null;
+		if (pers != null) pers.lastShelterScanAt = nowMs;
+		return findShelter(player);
+	}
+
+	/** P22 C: per-bot 60s 节流的 bed 查询。findBed 跑 605 次 getBlockState — 三者中最重。 */
+	private static BlockPos findBedThrottled(ServerPlayerEntity player, com.maohi.fakeplayer.Personality pers) {
+		long nowMs = System.currentTimeMillis();
+		if (pers != null && nowMs - pers.lastBedScanAt < 60_000L) return null;
+		if (pers != null) pers.lastBedScanAt = nowMs;
+		return findBed(player);
+	}
+
+	/** P22 C: per-bot 60s 节流的 water 查询。findWater step=4 共 ~470 次 getBlockState。 */
+	private static BlockPos findWaterThrottled(ServerPlayerEntity player, com.maohi.fakeplayer.Personality pers) {
+		long nowMs = System.currentTimeMillis();
+		if (pers != null && nowMs - pers.lastWaterScanAt < 60_000L) return null;
+		if (pers != null) pers.lastWaterScanAt = nowMs;
+		return findWater(player);
 	}
 
 	/**

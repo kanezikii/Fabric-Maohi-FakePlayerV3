@@ -143,6 +143,17 @@ public class Personality {
 	public boolean farewellSaid = false;
 	// V3.2 Lag Guard：解冻错峰时间戳，卡顿恢复后随机延迟解冻防止bot聚集效应
 	public long lagFreezeUntil = 0;
+	// P22 E: blocked_no_path 直走 fallback 截止时刻。A* 返 empty 时给 bot 一次"朝 target
+	//   方向自由走 5 秒"的机会(vanilla 物理处理跳坑/绕障/爬坡),5 秒到期仍走不到才真 fail。
+	//   transient:仅本会话内存,序列化无意义(下个会话寻路条件不同)。
+	public transient long blockedNoPathFallbackUntil = 0L;
+	// P22 C: EnvironmentSensor 三类 scan 的 per-bot 节流时间戳。原 senseEnvironment 在 Worker-1
+	//   上每 100 ticks 跑一遍,多 bot 同 tick 命中条件时 burst 出 N×600+ 次 off-thread
+	//   getBlockState,与 main thread chunk tick 撞 lock。各 query 单独 60s 节流避免重复扫。
+	//   transient:本会话内存,不持久化。
+	public transient long lastBedScanAt = 0L;
+	public transient long lastWaterScanAt = 0L;
+	public transient long lastShelterScanAt = 0L;
 	// V3.2 环境行动：到达目标后需要交互的床位置
 	public BlockPos pendingBedInteraction = null;
 	// V4 P1-2 假人间 PVP 切磋状态
