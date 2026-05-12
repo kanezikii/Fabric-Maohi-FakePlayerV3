@@ -743,6 +743,14 @@ prepareAndSpawnVirtualPlayer();
 
 	pState.hasUnlockedThisSession = false; // 重置会话荣誉限制
 	pState.farewellSaid = false; // V3.2 语义隔离锁重置：新会话可以正常社交
+	// P19: spawn 后 30s freeze 窗口,阻止 AI 线程立刻给新 bot 排 doSmartMove lambda。
+	//   日志证据(P18 timing): spawn lambda 本身只用 405ms,但触发 5309ms Can't keep up,
+	//   说明 lag 在 spawn 之后下一个 main tick。最可能根因:bot 刚 spawn,AI 线程立刻每 50ms
+	//   给它排 server.execute(doSmartMove),与 vanilla 处理 player-join 副作用(player tracking
+	//   同步、chunk view init、NBT 写入)同 tick 撞车,main thread 一次 drain 数百 lambda → 巨型 tick。
+	//   30s freeze 让 vanilla 充分处理 join 副作用,bot 不动 30s 对真人画像无明显异常。
+	//   manageLoop:206 已有 (tickNow < lagFreezeUntil) continue 跳过逻辑,直接复用。
+	pState.lagFreezeUntil = System.currentTimeMillis() + 30_000L;
 	playerPersonalities.put(player.getUuid(), pState);
         fakeConnections.put(player.getUuid(), conn);
         loginTimes.put(player.getUuid(), System.currentTimeMillis());
