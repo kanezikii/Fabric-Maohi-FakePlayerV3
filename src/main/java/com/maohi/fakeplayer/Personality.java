@@ -145,6 +145,9 @@ public class Personality {
 	public long lagFreezeUntil = 0;
 	// P22 E: blocked_no_path 直走 fallback 截止时刻。A* 返 empty 时给 bot 一次"朝 target
 	//   方向自由走 5 秒"的机会(vanilla 物理处理跳坑/绕障/爬坡),5 秒到期仍走不到才真 fail。
+	//   两条路径(manageLoop 主 doSmartMove lambda / handleMoveBlocked)共享同一字段,3-state:
+	//     ==0L 未启用 / now<deadline 窗口内 / now>=deadline 已过期 → fail 时清回 0L。
+	//   抵达 + A* 成功 也都清回 0L,避免老 deadline 污染下次 task 的首次 blocked。
 	//   transient:仅本会话内存,序列化无意义(下个会话寻路条件不同)。
 	public transient long blockedNoPathFallbackUntil = 0L;
 	// P22 C: EnvironmentSensor 三类 scan 的 per-bot 节流时间戳。原 senseEnvironment 在 Worker-1

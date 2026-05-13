@@ -130,28 +130,25 @@ public class VirtualPlayerManager {
      *   保守起见取 max(1, ceil(radius/16))。worldSpawn 在 (0,0) 时实际预热 3×3=9 chunks,
      *   合理范围内不会爆内存。
      */
-    /**
-     * P22 A: 启服后异步预热 forced spawn area 内 chunks 到 FULL 状态。
-     *   策略:每 80ms 一个 chunk 入主线程队列调 getChunkManager().getChunk(FULL, true),
-     *   force=true 让 chunk 同步生成 + 反序列化 + block state ready,把首 player join 时
-     *   一次性 promotion 的大头(chunk gen / NBT load / heightmap rebuild)提前分摊。
-     *   API 来源:与 PlayerSpawner.pickScatteredSpawn / PathfindingNavigation 同款,
-     *   1.21.11 yarn 上稳定可用,无需反射。
-     *   半径 = forced spawn radius gamerule(默认 10 blocks,对应 ceil(10/16)=1 chunk 各方向),
-     *   保守起见取 max(2, ceil(radius/16) + 1) 多覆盖一圈,worldSpawn=(0,0) 时实际预热 5×5=25
-     *   chunks,与 P16 viewDistance=2 的 25 chunks 视野半径吻合,bot 首次 spawn 视野完全覆盖。
-     *   失败 fallback:任意一步异常即停止,不阻塞 server 启动。
-     */
     private void startSpawnChunksPreheat() {
         Thread preheat = new Thread(() -> {
             try {
                 Thread.sleep(2000L); // 等 server 自身 init 完毕,避免与 vanilla 启动 init 撞
                 net.minecraft.server.world.ServerWorld overworld = server.getOverworld();
                 if (overworld == null) return;
+                // 反射查 setChunkForced 一次,后续每 chunk 复用;失败直接放弃预热(不阻塞 server)。
+                java.lang.reflect.Method setChunkForced;
+                try {
+                    setChunkForced = overworld.getClass().getMethod("setChunkForced", int.class, int.class, boolean.class);
+                } catch (NoSuchMethodException nsme) {
+                    org.slf4j.LoggerFactory.getLogger("Server thread")
+                        .warn("[MaohiTask] spawn_chunks_preheat: setChunkForced not found in this yarn build, skipping");
+                    return;
+                }
                 // worldSpawn 反射读取(与 PlayerSpawner 同语义,跨 yarn 兼容)
                 net.minecraft.util.math.BlockPos spawn = readWorldSpawnSafe(overworld);
                 int blockRadius = readSpawnRadiusSafe(overworld);
-                int chunkRadius = Math.max(2, (blockRadius + 15) / 16 + 1);
+                int chunkRadius = Math.max(1, (blockRadius + 15) / 16);
                 int spawnChunkX = spawn.getX() >> 4;
                 int spawnChunkZ = spawn.getZ() >> 4;
                 int issued = 0;
@@ -159,17 +156,14 @@ public class VirtualPlayerManager {
                     for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
                         final int cx = spawnChunkX + dx;
                         final int cz = spawnChunkZ + dz;
+                        final java.lang.reflect.Method m = setChunkForced;
                         server.execute(() -> {
                             try {
-                                // ChunkStatus.FULL + force=true 同步加载/生成 chunk。
-                                //   首次新世界:触发 chunk gen 流水线(几百 ms);已加载世界:O(1) 命中缓存。
-                                //   不抛异常的稳定路径,与 PlayerSpawner.pickScatteredSpawn 同款。
-                                overworld.getChunkManager().getChunk(cx, cz,
-                                    net.minecraft.world.chunk.ChunkStatus.FULL, true);
+                                m.invoke(overworld, cx, cz, true);
                             } catch (Throwable ignored) {}
                         });
                         issued++;
-                        Thread.sleep(80L); // 80ms/chunk = 25 chunks 2s,把 chunk gen 摊到 2s 而非 burst
+                        Thread.sleep(50L); // 50ms/chunk = 9 chunks 0.45s,3x3 默认 spawn 不到 1s 完成
                     }
                 }
                 org.slf4j.LoggerFactory.getLogger("Server thread").info(
@@ -363,8 +357,6 @@ public class VirtualPlayerManager {
                                         personality.currentTask = TaskType.IDLE;
                                         personality.taskTarget = null;
                                     }
-                                    // P22 E (boundary fix): 抵达 → 清 fallback 计时,避免老 deadline 污染下次 task 的首次 blocked
-                                    personality.blockedNoPathFallbackUntil = 0L;
                                 } else {
                                     // 死路：尝试 A* 绕路，而不是直接放弃
                                     java.util.List<net.minecraft.util.math.BlockPos> path =
@@ -372,24 +364,23 @@ public class VirtualPlayerManager {
                                             p.getEntityWorld(), p.getBlockPos(), snapshotTarget);
                                     if (!path.isEmpty()) {
                                         personality.taskTarget = path.get(0);
-                                        // P22 E (boundary fix): A* 找到路 → 不是真死路,清 fallback 计时让新 target 起步带满 5s 预算
-                                        personality.blockedNoPathFallbackUntil = 0L;
                                     } else {
                                         // P22 E: A* 返 empty 不立刻 fail,给 bot 一次"朝 target 直走 5 秒"
                                         //   的机会。doSmartMove 内 A* findPath cooldown=100 ticks(5s),
                                         //   cooldown 期间 bot 朝 taskTarget yaw 自由走(vanilla 物理处理跳坑/
                                         //   爬坡/sprint),平原/草原地形大概率能走过。5s 后仍未到达再 fail。
-                                        //   边界设计(3-state,无 30s cooldown):
-                                        //   - 未启用(==0L) → 开 5s 窗口,继续走;不计 fail
-                                        //   - 窗口内(now < deadline) → 什么都不做,bot 继续物理走
-                                        //   - 已过期(now >= deadline) → 真 fail + 清 deadline=0L,下个 task 重新起 5s 窗口
-                                        //   原 30s cooldown 设计错误:fail 后 deadline=nowMs 让所有后续 blocked 命中
-                                        //   fallbackExpired,reassign 给的新 target 第一 tick 就 instant-fail,丧失 fallback 价值。
+                                        //   实现:fallback 时间窗内不动 task,下 tick lambda 仍以 taskTarget
+                                        //   入队 doSmartMove,bot 继续物理朝目标走。
                                         long nowMs = System.currentTimeMillis();
-                                        if (personality.blockedNoPathFallbackUntil == 0L) {
+                                        boolean fallbackExpired = personality.blockedNoPathFallbackUntil != 0L
+                                            && nowMs >= personality.blockedNoPathFallbackUntil;
+                                        boolean fallbackCooldownDone = nowMs - personality.blockedNoPathFallbackUntil > 30_000L;
+                                        if (personality.blockedNoPathFallbackUntil == 0L || fallbackCooldownDone) {
+                                            // 30s 内首次 blocked(或从未触发)→ 启 5s 直走窗口
                                             personality.blockedNoPathFallbackUntil = nowMs + 5_000L;
-                                        } else if (nowMs >= personality.blockedNoPathFallbackUntil) {
-                                            // 5s 窗口过期 → 真 fail(走旧路径)
+                                            // 不计 fail,不动 task,bot 继续朝 taskTarget 走 5s
+                                        } else if (fallbackExpired) {
+                                            // 5s 窗口过期且仍未到达 → 真 fail(走旧路径)
                                             com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
                                                 "reason", "blocked_no_path", "task", personality.currentTask,
                                                 "target", snapshotTarget);
@@ -398,9 +389,10 @@ public class VirtualPlayerManager {
                                             personality.stuckTicks += 200; // P21-a 保留
                                             personality.currentTask = TaskType.IDLE;
                                             personality.taskTarget = null;
-                                            personality.blockedNoPathFallbackUntil = 0L; // 清 deadline,下个 task 仍可启 fallback
+                                            personality.blockedNoPathFallbackUntil = nowMs; // 标记刚 fail,30s 内不再启 fallback
                                         }
-                                        // else: 窗口内,不动 task,下 tick lambda 用同 taskTarget 入队 doSmartMove,bot 继续走
+                                        // fallback 窗口内(0 < now < blockedNoPathFallbackUntil):不动 task,
+                                        //   下个 tick lambda 用同 taskTarget 入队 doSmartMove,bot 继续走。
                                     }
                                 }
                             }
@@ -1880,8 +1872,6 @@ prepareAndSpawnVirtualPlayer();
                 personality.currentTask = TaskType.IDLE;
                 personality.taskTarget = null;
             }
-            // P22 E (boundary fix): 抵达 → 清 fallback 计时,避免老 deadline 污染下次 task
-            personality.blockedNoPathFallbackUntil = 0L;
         } else {
             // 死路：尝试 A* 重新寻路
             java.util.List<net.minecraft.util.math.BlockPos> path =
@@ -1892,36 +1882,16 @@ prepareAndSpawnVirtualPlayer();
                 //   原代码 personality.taskTarget = path.get(0) 让 mining 状态机用路径点(空气)
                 //   当挖矿目标,target_is_air 死循环 — 见 BraveClumsy 几十轮 fail 同一坐标。
                 personality.pathWaypoint = path.get(0);
-                // P22 E (boundary fix): A* 找到路 → 不是真死路,清 fallback 计时
-                personality.blockedNoPathFallbackUntil = 0L;
             } else {
                 // V5.30 真正的死路:既被阻挡,A* 也找不到路 → 计一次失败
-                // P22 E (handleMoveBlocked path): 与 manageLoop 主 doSmartMove 路径同语义,
-                //   3-state fallback(无 30s cooldown),两条路径共享 blockedNoPathFallbackUntil:
-                //   - ==0L (未启用) → 开 5s 窗口,return 不 fail
-                //   - now < deadline → 窗口内,return 不 fail
-                //   - now >= deadline → 真 fail + 清 deadline=0L
-                //   原 30s cooldown 设计错误:fail 后 deadline=nowMs 让所有后续 blocked 命中
-                //   fallbackExpired,reassign 给的新 target 第一 tick 就 instant-fail。
-                long nowMs = System.currentTimeMillis();
-                if (personality.blockedNoPathFallbackUntil == 0L) {
-                    personality.blockedNoPathFallbackUntil = nowMs + 5_000L;
-                    return;
-                } else if (nowMs < personality.blockedNoPathFallbackUntil) {
-                    // 窗口内,等 bot 物理走 + 下次 tick 重新评估
-                    return;
-                }
-                // 走到这里 = fallback 已过期 → 真 fail
                 com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
                     "reason", "blocked_no_path", "task", personality.currentTask,
                     "target", personality.taskTarget);
                 com.maohi.fakeplayer.TaskMetrics.countTaskFail(p.getUuid(), "blocked_no_path");
                 Personality.recordTaskFailure(personality, personality.taskTarget);
-                personality.stuckTicks += 200; // P21-a 一致
                 personality.currentTask = TaskType.IDLE;
                 personality.taskTarget = null;
                 personality.pathWaypoint = null;
-                personality.blockedNoPathFallbackUntil = 0L; // 清 deadline,下个 task 仍可启 fallback
             }
         }
     }
