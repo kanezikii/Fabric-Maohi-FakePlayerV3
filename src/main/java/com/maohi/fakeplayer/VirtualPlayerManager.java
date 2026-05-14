@@ -84,7 +84,10 @@ public class VirtualPlayerManager {
         //   没 promote 到 ENTITY_TICKING,首 player join 时一次性同步 promote → main thread 卡)。
         //   60s 给 vanilla deferred chunk task / commands tree compile / recipe sync 等异步工
         //   作充分 settle。配合 P22 A(主动预热 spawn chunks)能把首 bot lag 压到 < 1s。
-        nextJoinTime = System.currentTimeMillis() + 60_000L;
+        // P24: 60s → 90s。preheat 禁用后,完全依赖 vanilla 后台 worker 异步 promote spawn chunks。
+        //   90s 给 vanilla 更长 idle 窗口慢慢 promote 完所有 spawn chunks 到 ENTITY_TICKING,
+        //   首 bot 上线时不再触发集中 promote burst。
+        nextJoinTime = System.currentTimeMillis() + 90_000L;
         // planA B-4: 清空 BlockScanCache,确保新会话不被上次跑测的 30s TTL 残留坐标污染。
         //   重启 / 热加载 / 单服 /tps reset 等场景 instance 不一定重建,显式清一次保险。
         blockScanCache.clearAll();
@@ -140,14 +143,15 @@ public class VirtualPlayerManager {
         //   bot 上线时 chunks 已就绪,首 player join 跳过 promotion 阶段。
         //   失败 fallback:任意一步异常即停止,不阻塞 server 启动。
         //
-        // P24: 间隔从 80ms 拉到 1500ms,彻底消除 "Can't keep up"。
-        //   原 80ms 间隔下 9 chunks × 280ms gen 实际重叠成 2.5s 主线程 burst → 触发警告。
-        //   1500ms 间隔让单 chunk gen 280ms 落地后主线程有 1220ms 恢复窗口,
-        //   vanilla "Can't keep up"(累积 ≥2000ms 落后才警告)的累积条件永不满足。
-        //   9 chunks × 1500ms = 13.5s 总预热时间,仍远小于 60s spawn 窗口,首 bot 上线时
-        //   chunks 全部就绪 → 首 bot spawn 也不卡。
-        //   代价:启动后 13.5s 内 spawn area 才完全预热,期间假人不会上线(被 60s 窗口挡住)。
-        startSpawnChunksPreheat();
+        // P24 DISABLED v2: 实测 setChunkForced 也救不了——promote 9 chunks 到 ENTITY_TICKING
+        //   这个动作本身就是 ~5s 主线程负载(触发 mob spawn / heightmap / lighting init),
+        //   不论用什么 API 触发都卡。这已经是 vanilla 引擎硬限制(单线程引擎下 chunk promote
+        //   必须在主线程跑)。
+        //   实事求是:首 bot spawn 时 vanilla 自身会触发 promote(注释提到 6~12s lag),
+        //   但配合 P22 B 的 60s spawn 延迟,vanilla 后台 worker 有充裕时间慢慢自己处理。
+        //   不做 preheat → 启动期 0 burst;首 bot spawn 时 chunks 已被 vanilla 异步 promote 完毕。
+        //   要恢复:取消下行注释。
+        // startSpawnChunksPreheat();
     }
 
     /**
@@ -2083,6 +2087,33 @@ prepareAndSpawnVirtualPlayer();
                 com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
                     "reason", "target_is_air", "task", personality.currentTask, "target", mineTarget);
                 com.maohi.fakeplayer.TaskMetrics.countTaskFail(p.getUuid(), "target_is_air");
+                Personality.recordTaskFailure(personality, mineTarget);
+                personality.currentTask = TaskType.IDLE;
+                personality.taskTarget = null;
+                return;
+            }
+
+            // P24: eye-to-block reach 检查 — vanilla 4.5 格 reach 上限。
+            //   外层触发条件 dist<=25(脚位 5 格 squared)只看 xz+y 平面距离,但 vanilla 服务端
+            //   破坏方块时用的是 EYE position(player.y + 1.62)。bot 脚位 5 格内但站位高/低于
+            //   target ≥3 格时,eye-to-block 距离实际超 vanilla 4.5 格,finishDestroyBlock 包被拒。
+            //   症状:mine_start 发出 → 卡 mining 状态(豁免 stuck 检测)→ 120s 后才 task_fail expired
+            //   救一次 → reassign 同高度 target → 又卡 120s → 循环 7 分钟 0 木头。
+            //   日志证据(08:02:18 Starforged9): bot.y=92.5 target=(6,93,3) y=93,dy 检查通过但 bot
+            //   被引到 (8,92,3) 附近,eye 到 target 中心实际 ~5.5 格 vanilla reject。
+            //   修复:严格按 vanilla 4.5 格 eye distance 拦截,超出立即 task_fail + blacklist target,
+            //   不进入 mining 状态机 → 不卡 120s → assign 立刻选 dy 更小的下一个 target。
+            double eyeY = p.getY() + 1.62;
+            double rdx = mineTarget.getX() + 0.5 - p.getX();
+            double rdy = mineTarget.getY() + 0.5 - eyeY;
+            double rdz = mineTarget.getZ() + 0.5 - p.getZ();
+            double reachDist = Math.sqrt(rdx*rdx + rdy*rdy + rdz*rdz);
+            if (reachDist > 4.5) {
+                com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
+                    "reason", "reach_too_far", "task", personality.currentTask,
+                    "target", mineTarget, "dist", String.format("%.2f", reachDist),
+                    "dy", String.format("%.2f", rdy));
+                com.maohi.fakeplayer.TaskMetrics.countTaskFail(p.getUuid(), "reach_too_far");
                 Personality.recordTaskFailure(personality, mineTarget);
                 personality.currentTask = TaskType.IDLE;
                 personality.taskTarget = null;
