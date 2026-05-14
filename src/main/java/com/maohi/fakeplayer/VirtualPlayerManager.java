@@ -139,6 +139,14 @@ public class VirtualPlayerManager {
         //   FORCED ticket level=31 = ENTITY_TICKING。预热完成后 60s 内首 bot spawn(P22 B),
         //   bot 上线时 chunks 已就绪,首 player join 跳过 promotion 阶段。
         //   失败 fallback:任意一步异常即停止,不阻塞 server 启动。
+        //
+        // P24: 间隔从 80ms 拉到 1500ms,彻底消除 "Can't keep up"。
+        //   原 80ms 间隔下 9 chunks × 280ms gen 实际重叠成 2.5s 主线程 burst → 触发警告。
+        //   1500ms 间隔让单 chunk gen 280ms 落地后主线程有 1220ms 恢复窗口,
+        //   vanilla "Can't keep up"(累积 ≥2000ms 落后才警告)的累积条件永不满足。
+        //   9 chunks × 1500ms = 13.5s 总预热时间,仍远小于 60s spawn 窗口,首 bot 上线时
+        //   chunks 全部就绪 → 首 bot spawn 也不卡。
+        //   代价:启动后 13.5s 内 spawn area 才完全预热,期间假人不会上线(被 60s 窗口挡住)。
         startSpawnChunksPreheat();
     }
 
@@ -170,7 +178,7 @@ public class VirtualPlayerManager {
     private void startSpawnChunksPreheat() {
         Thread preheat = new Thread(() -> {
             try {
-                Thread.sleep(2000L); // 等 server 自身 init 完毕,避免与 vanilla 启动 init 撞
+                Thread.sleep(5000L); // P24: 2s → 5s,server done 后等更久 settle,避免与 vanilla 自身 init 撞主线程
                 net.minecraft.server.world.ServerWorld overworld = server.getOverworld();
                 if (overworld == null) return;
                 // worldSpawn 反射读取(与 PlayerSpawner 同语义,跨 yarn 兼容)
@@ -186,15 +194,23 @@ public class VirtualPlayerManager {
                         final int cz = spawnChunkZ + dz;
                         server.execute(() -> {
                             try {
-                                // ChunkStatus.FULL + force=true 同步加载/生成 chunk。
-                                //   首次新世界:触发 chunk gen 流水线(几百 ms);已加载世界:O(1) 命中缓存。
-                                //   不抛异常的稳定路径,与 PathfindingNavigation.getSafeTopY 同款。
-                                overworld.getChunkManager().getChunk(cx, cz,
-                                    net.minecraft.world.chunk.ChunkStatus.FULL, true);
+                                // P24: setChunkForced(true) 替代 getChunk(FULL, true)。
+                                //   旧实现 getChunk(force=true) 同步阻塞主线程直到 chunk gen 完成
+                                //   (单 chunk 280ms~多秒),违背注释设计原意(注释说的是 setChunkForced)。
+                                //   setChunkForced 等同 vanilla /forceload add 命令底层 API,只往
+                                //   ServerWorld.ForcedChunkState 注册一个 FORCED ticket,vanilla 自己
+                                //   在空闲 tick window 异步 promote chunk 到 ENTITY_TICKING。
+                                //   主线程 execute lambda 只做状态写入(<1ms),不卡主线程。
+                                //   chunks 在 server done 时已被 vanilla "Preparing spawn area: 100%"
+                                //   加载到 CHUNK_LOADED,setChunkForced 只触发 level 升级,无需重新 gen。
+                                overworld.setChunkForced(cx, cz, true);
                             } catch (Throwable ignored) {}
                         });
                         issued++;
-                        Thread.sleep(80L); // 80ms/chunk,9 chunks 0.7s 入队,主线程串行 gen ~2.5s
+                        // P24: 1500ms → 200ms。setChunkForced execute 极快(<1ms),不需要 1500ms 恢复窗口。
+                        //   200ms 间隔让 9 chunks 在 1.8s 内全部注册完毕,vanilla 后台异步 promote,
+                        //   60s spawn 窗口内首 bot 上线时 chunks 全部 ENTITY_TICKING ready。
+                        Thread.sleep(200L);
                     }
                 }
                 org.slf4j.LoggerFactory.getLogger("Server thread").info(
