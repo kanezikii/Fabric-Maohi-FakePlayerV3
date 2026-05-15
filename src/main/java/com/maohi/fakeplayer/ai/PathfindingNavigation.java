@@ -164,6 +164,41 @@ public class PathfindingNavigation {
 	}
 
 	/**
+	 * P25: 从 pos 向下扫连续 air 格数,等价于 bot 站到 pos 后的 fall distance。
+	 *   vanilla 跌落伤害公式:damage = max(0, fall - 3)。所以:
+	 *     fall ≤ 3 = 无伤,fall = 4 = 1 心,fall = 5 = 2 心,...
+	 *   maxScan 限制扫描深度,超过返 maxScan+1(视为深悬崖)。
+	 *
+	 *   设计:不替代 isDangerAhead(A* 仍用保守阈值),而是给 doSmartMove 一个细粒度
+	 *   API 做 HP-guarded 决策——bot 健康时可主动跳 4 格扣 1 心断崖以脱困,低 HP 时不冒险。
+	 */
+	public static int getFallDepth(ServerWorld world, BlockPos pos, int maxScan) {
+		BlockPos cur = pos.down();
+		int depth = 0;
+		while (depth < maxScan && world.getBlockState(cur).isAir()) {
+			cur = cur.down();
+			depth++;
+		}
+		// 已扫 maxScan 格仍 air → 视为深悬崖,返回 maxScan+1 让调用方判 danger
+		return world.getBlockState(cur).isAir() ? maxScan + 1 : depth;
+	}
+
+	/**
+	 * P25: 从 isDangerAhead 抽出的"非落差类危险方块"检查 —— 岩浆 / 火 / 岩浆块 / chunk 未加载。
+	 *   doSmartMove 用 getFallDepth + HP 自行做落差决策,但岩浆/火等仍然必拒,所以单独这个 API。
+	 */
+	public static boolean isHazardousBlock(ServerWorld world, BlockPos pos) {
+		if (!isChunkFullyLoaded(world, pos)) return true;
+		net.minecraft.block.BlockState state = world.getBlockState(pos);
+		if (state.getFluidState().getFluid().matchesType(net.minecraft.fluid.Fluids.LAVA)
+			|| state.isOf(net.minecraft.block.Blocks.FIRE)
+			|| world.getBlockState(pos.down()).isOf(net.minecraft.block.Blocks.MAGMA_BLOCK)) {
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * planA B-2:检查 chunk 是否已加载到 FULL 状态(可读真实方块数据)。
 	 *   不主动加载(force=false):若返 null 说明 chunk 未到 FULL,调用方应视为"未知地形"
 	 *   而非"已确认空气/空地"。这是修复"未加载 chunk 误判为安全"的关键。
@@ -365,6 +400,13 @@ public class PathfindingNavigation {
 			new Neighbor(pos.south().down(2), 1.4),
 			new Neighbor(pos.east().down(2), 1.4),
 			new Neighbor(pos.west().down(2), 1.4),
+			// P25: 3 格落差,vanilla 公式 max(0,3-3)=0 无伤上限,允许 A* 算下坡路径过 3 格断崖。
+			//   cost 1.8 > down(2) 1.4:略高让 A* 仍优先小台阶,只在 2 格台阶绕不开时选 3 格跳。
+			//   4 格落差(扣 1 心)不加 A* 邻居 —— A* 没法读 HP,4 格冒险交给 doSmartMove 临时决策。
+			new Neighbor(pos.north().down(3), 1.8),
+			new Neighbor(pos.south().down(3), 1.8),
+			new Neighbor(pos.east().down(3), 1.8),
+			new Neighbor(pos.west().down(3), 1.8),
 			// V5.41: 楼梯上爬(水平+2 格高,Baritone 借鉴) — 解决矿坑沿 2 格高差卡路
 			// cost 2.5 > 跳跃 1.5:优先绕路平地;目标在上方时 heuristic Y 分量会驱动选此路
 			new Neighbor(pos.north().up(2), 2.5),
