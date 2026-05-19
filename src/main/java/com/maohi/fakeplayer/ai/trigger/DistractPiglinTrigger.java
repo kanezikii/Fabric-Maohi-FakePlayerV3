@@ -3,7 +3,7 @@ package com.maohi.fakeplayer.ai.trigger;
 import com.maohi.fakeplayer.Personality;
 import com.maohi.fakeplayer.TaskType;
 import com.maohi.fakeplayer.network.PacketHelper;
-import net.minecraft.entity.mob.piglin.PiglinEntity;
+import net.minecraft.entity.mob.PiglinEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.Items;
 import net.minecraft.server.network.ServerPlayerEntity;

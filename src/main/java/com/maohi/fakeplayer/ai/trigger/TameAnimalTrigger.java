@@ -3,7 +3,7 @@ package com.maohi.fakeplayer.ai.trigger;
 import com.maohi.fakeplayer.Personality;
 import com.maohi.fakeplayer.TaskType;
 import com.maohi.fakeplayer.network.PacketHelper;
-import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.passive.CatEntity;
 import net.minecraft.entity.passive.WolfEntity;
 import net.minecraft.entity.player.PlayerInventory;
@@ -86,7 +86,7 @@ public final class TameAnimalTrigger implements AchievementTrigger {
 	/** 共用收尾:走过去 → 切饲料 → 朝目标 → 连续 interactMob 最多 8 次 → 挥手 */
 	private static boolean feedAndInteract(ServerPlayerEntity player, Personality personality,
 	                                       PlayerInventory inv, net.minecraft.item.Item food,
-	                                       LivingEntity target) {
+	                                       MobEntity target) {
 		double distSq = player.squaredDistanceTo(target);
 		if (distSq > 9.0) {
 			personality.taskTarget = target.getBlockPos();
@@ -134,7 +134,7 @@ public final class TameAnimalTrigger implements AchievementTrigger {
 	}
 
 	/** 检查 WolfEntity / CatEntity 是否已驯服(用于循环早停) */
-	private static boolean isTamed(LivingEntity target) {
+	private static boolean isTamed(MobEntity target) {
 		if (target instanceof WolfEntity w) return w.isTamed();
 		if (target instanceof CatEntity c) return c.isTamed();
 		return false; // 未知类型当作未 tamed,继续 try(由 maxTries 上限兜底防溢出)
@@ -157,7 +157,7 @@ public final class TameAnimalTrigger implements AchievementTrigger {
 		return nearest(player, cats);
 	}
 
-	private static <T extends LivingEntity> T nearest(ServerPlayerEntity player, List<T> candidates) {
+	private static <T extends MobEntity> T nearest(ServerPlayerEntity player, List<T> candidates) {
 		T best = null;
 		double bestSq = Double.MAX_VALUE;
 		for (T e : candidates) {
