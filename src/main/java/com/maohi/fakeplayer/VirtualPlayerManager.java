@@ -116,14 +116,29 @@ public class VirtualPlayerManager {
 	{
 		java.util.Set<String> oldSet = sp.personality.unlockedAdvancements;
 		java.util.Set<String> safeSet = java.util.concurrent.ConcurrentHashMap.newKeySet();
-		if (oldSet != null) safeSet.addAll(oldSet);
+		if (oldSet != null) {
+			// V5.54: 一次性归一化历史脏数据 — 剥掉 "minecraft:" 前缀,与项目其他写入点(directGrant /
+			//   grantOne / EquipmentBehavior 等)统一裸路径。老存档里 syncFromVanilla 写过的
+			//   "minecraft:story/mine_stone" 会和 directGrant 写的 "story/mine_stone" 在 Set 里
+			//   并存为两份,这里归一化后 add 会自动去重,/maohi list 数字不再翻倍。
+			for (String advId : oldSet) {
+				if (advId == null) continue;
+				safeSet.add(advId.startsWith("minecraft:") ? advId.substring("minecraft:".length()) : advId);
+			}
+			if (safeSet.size() != oldSet.size()) storage.markDirty();
+		}
 		sp.personality.unlockedAdvancements = safeSet;
 	}
 	// P23: 一次性迁移 SavedPlayer.unlockedAdvancements (死字段 List) 内容到 personality.unlockedAdvancements,
 	//   迁完清空 List。处理"老存档只在 SavedPlayer 那层有数据"的兼容场景。
 	//   下次写盘后 JSON 的 unlockedAdvancements 是空 [],personality.unlockedAdvancements 是唯一权威。
+	// V5.54: 同样剥 "minecraft:" 前缀,与归一化口径一致。
 	if (!sp.unlockedAdvancements.isEmpty()) {
-		sp.personality.unlockedAdvancements.addAll(sp.unlockedAdvancements);
+		for (String advId : sp.unlockedAdvancements) {
+			if (advId == null) continue;
+			sp.personality.unlockedAdvancements.add(
+				advId.startsWith("minecraft:") ? advId.substring("minecraft:".length()) : advId);
+		}
 		sp.unlockedAdvancements.clear();
 		storage.markDirty();
 	}

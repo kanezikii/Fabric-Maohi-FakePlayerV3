@@ -315,9 +315,17 @@ public class MaohiCommands {
             if (advs == null || advs.isEmpty()) {
                 feedback(ctx.getSource(), "  §7成就: §8无");
             } else {
-                feedback(ctx.getSource(), "  §7成就 §f" + advs.size() + " §7个:");
+                // V5.54: 显示前归一化 + 去重 — 内存里可能仍混着 "minecraft:story/mine_stone" 与
+                //   "story/mine_stone" 双份(直到 bot 重启走 loadData 归一化路径才永久清理),
+                //   这里兜底让在线 bot 不重启也能立刻看到正确的去重计数与列表。
+                java.util.Set<String> dedup = new java.util.LinkedHashSet<>();
+                for (String adv : advs) {
+                    if (adv == null) continue;
+                    dedup.add(adv.startsWith("minecraft:") ? adv.substring("minecraft:".length()) : adv);
+                }
+                feedback(ctx.getSource(), "  §7成就 §f" + dedup.size() + " §7个:");
                 // 按 namespace 分组排序输出,每行最多 4 个
-                java.util.List<String> sorted = new java.util.ArrayList<>(advs);
+                java.util.List<String> sorted = new java.util.ArrayList<>(dedup);
                 java.util.Collections.sort(sorted);
                 StringBuilder line = new StringBuilder("    §a");
                 int colCount = 0;
@@ -435,12 +443,17 @@ public class MaohiCommands {
         //   / story/iron_source 等),让 list 显示的成就数 = vanilla 真人会广播的那批。
         //   说明:vanilla advancement 含 root 类(announce_to_chat=false 不广播),仍算在内 ——
         //   真人 advancement tab 也是会显示 root 已解锁的,只是没 chat 广播,语义一致。
+        // V5.54: 先按归一化(剥 "minecraft:" 前缀) dedup,避免同一成就 "minecraft:story/mine_stone"
+        //   与 "story/mine_stone" 双份格式在 Set 里并存导致 advCount 翻倍。
         int advCount = 0;
         if (pers != null && pers.unlockedAdvancements != null && !pers.unlockedAdvancements.isEmpty()) {
             net.minecraft.server.MinecraftServer server = manager.getServer();
             if (server != null) {
+                java.util.Set<String> seenPaths = new java.util.HashSet<>();
                 for (String advId : pers.unlockedAdvancements) {
+                    if (advId == null) continue;
                     String path = advId.contains(":") ? advId.substring(advId.indexOf(':') + 1) : advId;
+                    if (!seenPaths.add(path)) continue; // 同一 path 已计过,跳过双份格式
                     try {
                         if (server.getAdvancementLoader().get(net.minecraft.util.Identifier.of("minecraft", path)) != null) {
                             advCount++;

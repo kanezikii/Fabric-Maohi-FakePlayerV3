@@ -74,7 +74,13 @@ public final class AchievementSimulator {
 
 		if (allAdvs != null && !allAdvs.isEmpty()) {
 			for (AdvancementEntry entry : allAdvs) {
-				String advId = entry.id().toString();
+				// V5.54: ID 归一化 — minecraft namespace 剥前缀,与项目其他写入点(directGrant/grantOne/
+				//   EquipmentBehavior/SmeltingBehavior/CraftingBehavior)统一裸路径(story/xxx)。
+				//   旧版本这里写 "minecraft:story/mine_stone",其他写入点写 "story/mine_stone",
+				//   /maohi list 显示 size 双倍,实际同一成就被记两次。mod advancement(非 minecraft
+				//   namespace)保留完整 ID,不和项目内部里程碑冲突。
+				net.minecraft.util.Identifier advIdObj = entry.id();
+				String advId = "minecraft".equals(advIdObj.getNamespace()) ? advIdObj.getPath() : advIdObj.toString();
 
 				// 过滤 recipe 类(display=empty):不统计 "minecraft:recipes/..." 这类自动解锁的非成就 advancement
 				if (entry.value().display().isEmpty()) continue;
