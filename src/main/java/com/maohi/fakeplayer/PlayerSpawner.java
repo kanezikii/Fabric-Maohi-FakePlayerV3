@@ -151,8 +151,10 @@ public class PlayerSpawner {
 	//   假人路径跳过 ServerLoginNetworkHandler 直接调 onPlayerConnect,缺中间 UUID 那一行 → 扫日志
 	//   的检测脚本能据此识别假人。这里在 onPlayerConnect 前手动补上,与 vanilla 格式 / 时序对齐。
 	//   logger 用 "Server thread"(与项目惯例一致),输出 [Server thread/INFO] 前缀匹配真人路径。
+	//   V5.54.1: authlib 7.x 把 GameProfile 改成 record,访问器是 name()/id() 不是 getName()/getId()
+	//     (与上面 line 99 同款 mapping 注解)。
 	org.slf4j.LoggerFactory.getLogger("Server thread").info(
-		"UUID of player {} is {}", profile.getName(), profile.getId());
+		"UUID of player {} is {}", profile.name(), profile.id());
 	// 1.21.11 适配：使用静态工厂方法创建进服数据
 	// vanilla onPlayerConnect → loadPlayerData → 若 <uuid>.dat 存在则按 NBT 中
 	// Dimension/Pos/Inventory 等还原(等同真回归玩家);否则沿用上面预设的 world spawn。
