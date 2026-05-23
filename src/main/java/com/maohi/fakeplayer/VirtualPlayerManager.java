@@ -419,6 +419,13 @@ public class VirtualPlayerManager {
 	int logicTickCounter = 0;
 	int currentSleepMs = 50; // V3.2 Lag Guard：动态休眠基准值（平滑过渡）
 	boolean wasLagging = false; // V3.2 Lag Guard：卡顿状态追踪（用于解冻错峰）
+	// V5.59 (diag): mspt 突升检测器,记录上一轮 mspt 与上次 spike log 时间戳。
+	//   触发条件:本轮 mspt - 上轮 mspt > 80 (单循环 ~50ms 内涨 80 ≈ 主线程刚被打了一次 burst),
+	//   或本轮 mspt 绝对值 >150 (持续重卡)。30s 节流,避免持续卡顿期间刷屏。
+	//   配合 manage_loop_slow 日志可以判断:burst 是 mod 自身 main lambda 引起 (两条 log 同步出现)
+	//   还是 vanilla autosave/chunk gen (mod 这边干净,只有 mspt_spike)。
+	double lastMspt = 0.0;
+	long lastMsptSpikeLogAt = 0L;
 	while (running) {
 	try {
 	long tickNow = System.currentTimeMillis();
@@ -427,6 +434,22 @@ public class VirtualPlayerManager {
 
 	// V3.2 Lag Guard：自适应 AI 线程休眠，卡顿时不抢 CPU
 	double mspt = server.getAverageTickTime();
+	// V5.59 (diag): mspt 突升日志,30s 节流
+	double msptDelta = mspt - lastMspt;
+	if ((msptDelta > 80.0 || mspt > 150.0) && tickNow - lastMsptSpikeLogAt > 30_000L) {
+		lastMsptSpikeLogAt = tickNow;
+		com.maohi.fakeplayer.TaskLogger.logRaw("SYSTEM", "mspt_spike",
+			"mspt", String.format("%.1f", mspt),
+			"deltaFromLast", String.format("%.1f", msptDelta),
+			"bots", virtualPlayerUUIDs.size(),
+			"pendingSpawn", pendingSpawnQueue.size(),
+			"pendingLogout", pendingLogoutQueue.size(),
+			"inFlightLogout", inFlightLogouts.size(),
+			"forcedSpawnChunks", forcedSpawnChunks.size(),
+			"loggedOutScheduled", logoutScheduledTime.size(),
+			"pendingRespawn", pendingRespawn.size());
+	}
+	lastMspt = mspt;
 	int targetSleepMs;
 	if (mspt <= 35) targetSleepMs = 50;       // 正常：20Hz
 	else if (mspt <= 50) targetSleepMs = 100;  // 轻卡：10Hz
@@ -777,6 +800,21 @@ prepareAndSpawnVirtualPlayer();
                         
                         long end = System.nanoTime();
                         MaohiCommands.recordTickTime(end - start); // 记录性能指标
+                        // V5.59 (diag): 单次 manageLoop main lambda 自身耗时 >500ms 即 dump 上下文,
+                        //   定位 60-90s 周期性 Can't keep up 4000ms+ 的真凶。常嫌疑:多只 bot 同时 cold_chunk_teleport
+                        //   或 vanilla 5min autosave 撞上 manageLoop main lambda。打 mspt 前后 + 关键队列尺寸,
+                        //   配合后面的 mspt_spike 日志能锁定到具体 spawn/logout/scan 哪一步耗时大。
+                        long mainLambdaMs = (end - start) / 1_000_000L;
+                        if (mainLambdaMs > 500) {
+                            com.maohi.fakeplayer.TaskLogger.logRaw("SYSTEM", "manage_loop_slow",
+                                "ms", mainLambdaMs,
+                                "mspt", String.format("%.1f", server.getAverageTickTime()),
+                                "bots", virtualPlayerUUIDs.size(),
+                                "pendingSpawn", pendingSpawnQueue.size(),
+                                "pendingLogout", pendingLogoutQueue.size(),
+                                "inFlightLogout", inFlightLogouts.size(),
+                                "forcedSpawnChunks", forcedSpawnChunks.size());
+                        }
                         
 		if (storage.isDirty() && nowMs - storage.getLastSaveTime() > TimingConstants.AUTO_SAVE_INTERVAL) saveData();
                     });
