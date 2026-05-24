@@ -801,8 +801,15 @@ public final class CraftingBehavior {
 			for (int dx = -d; dx <= d; dx++) {
 				for (int dz = -d; dz <= d; dz++) {
 					if (Math.max(Math.abs(dx), Math.abs(dz)) != d) continue;
+					int worldX = center.getX() + dx;
+					int worldZ = center.getZ() + dz;
+					// V5.59: chunk-level 预检 — 未就绪即跳过整列(7 dy),避免 world.getBlockState 内部
+					//   getChunk(FULL,true) 在 chunk gen 未完成时 pump 主线程任务队列。watchdog 已抓到
+					//   findBlockNearby:806 卡 ~1s。chunk 已 FULL 时下方 getBlockState 走 fast cache hit
+					//   不会 park。
+					if (!PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
 					for (int dy = -3; dy <= 3; dy++) {
-						mut.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+						mut.set(worldX, center.getY() + dy, worldZ);
 						if (world.getBlockState(mut).isOf(block)) {
 							return mut.toImmutable();
 						}

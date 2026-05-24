@@ -1,10 +1,12 @@
 package com.maohi.fakeplayer.ai;
 
+import net.minecraft.server.world.ChunkHolder;
+import net.minecraft.server.world.ServerChunkManager;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.Heightmap;
-import net.minecraft.world.chunk.Chunk;
-import net.minecraft.world.chunk.ChunkStatus;
+import net.minecraft.world.chunk.WorldChunk;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,6 +58,70 @@ public class PathfindingNavigation {
 
 	private static final ConcurrentHashMap<Long, CacheEntry> PATH_CACHE = new ConcurrentHashMap<>();
 
+	/**
+	 * V5.59: 真正非阻塞的 chunk 访问 — 只返回已在 WorldChunk(FULL)状态的 chunk,未就绪即返 null。
+	 *
+	 * <p>背景:vanilla {@code ServerChunkManager.getChunk(x, z, FULL, false)} 在主线程调用且 4-slot
+	 * 缓存未命中时会调 {@code mainThreadExecutor.runTasks(future::isDone)} 强制清空积压的 chunk gen
+	 * 任务队列,主线程 park 数秒。watchdog 抓到一次 1.148s 卡顿就来自此条路径(bot spawn →
+	 * {@code getSafeSpawnY}),极端场景下能卡 17 秒。
+	 *
+	 * <p>本方法绕开 slow path:通过 ServerChunkManagerAccessor mixin 直接拿 ChunkHolder,
+	 * {@link ChunkHolder#getWorldChunk()} 是 O(1) 状态查询,不存在/未就绪即 null。<b>整条路径无
+	 * task pump、无 park</b>。
+	 *
+	 * <p>失败兜底:Mixin 加载失败 / ChunkHolder API 改名等异常时 catch Throwable 返 null,调用方
+	 * 应已经过 {@code world.isChunkLoaded(x, z)} 之类的预检,null 路径仅作为"chunk 未就绪"处理。
+	 */
+	private static WorldChunk getChunkIfReady(ServerWorld world, int chunkX, int chunkZ) {
+		try {
+			ServerChunkManager scm = world.getChunkManager();
+			com.maohi.mixin.ServerChunkManagerAccessor accessor =
+				(com.maohi.mixin.ServerChunkManagerAccessor) scm;
+			ChunkHolder holder = accessor.maohi$getChunkHolder(ChunkPos.toLong(chunkX, chunkZ));
+			if (holder == null) return null;
+			return holder.getWorldChunk();
+		} catch (Throwable t) {
+			return null;
+		}
+	}
+
+	/**
+	 * V5.59 public 版本:供项目内热路径(扫块循环、AI 决策)做主动 chunk 预检。
+	 * 调用方应在 BlockPos / chunk 坐标循环外做一次,缓存结果,避免重复查询。
+	 */
+	public static boolean isChunkReady(ServerWorld world, int chunkX, int chunkZ) {
+		return getChunkIfReady(world, chunkX, chunkZ) != null;
+	}
+
+	/**
+	 * V5.59 安全 getBlockState 包装 — 非阻塞版本。
+	 *
+	 * <p>背景:vanilla {@code world.getBlockState(pos)} 内部调 {@code getChunk(FULL, false)},
+	 * chunk 未加载时会 pump 主线程任务队列等待加载,实测 bot AI 扫块循环命中未加载 chunk →
+	 * 卡 1~17s。watchdog 已抓到 CraftingBehavior.findBlockNearby 这种 169×7 次 getBlockState
+	 * 循环里随便一个未加载 chunk 就把整个主线程冻住。
+	 *
+	 * <p>本方法先用 getChunkIfReady 做 O(1) 状态确认,只有 chunk 已 FULL 才调真实 getBlockState
+	 * (此时绝不阻塞,vanilla 走 fast cache hit 路径);未加载即返 null。
+	 *
+	 * <p><b>调用方语义</b>:返 null = "未知,该位置 chunk 未加载,请跳过/重试"。<b>不</b>等同 AIR。
+	 * 调用方应用 {@code if (state == null) continue;} 等模式,绝不要 .isOf() 调用前不查 null。
+	 *
+	 * <p><b>性能</b>:O(1) chunk 查询 + 1 次 getBlockState。比原直接调用多一次 hashmap lookup,
+	 * 在 chunk 已加载的常见情形下额外开销 < 50ns,可忽略。
+	 *
+	 * @param world ServerWorld 实例
+	 * @param pos 目标位置
+	 * @return 已加载位置返 BlockState,未加载返 null
+	 */
+	@org.jetbrains.annotations.Nullable
+	public static net.minecraft.block.BlockState safeGetBlockState(ServerWorld world, BlockPos pos) {
+		WorldChunk chunk = getChunkIfReady(world, pos.getX() >> 4, pos.getZ() >> 4);
+		if (chunk == null) return null;
+		return chunk.getBlockState(pos);
+	}
+
 	private static final class CacheEntry {
 		final List<BlockPos> path;
 		final long expireAtNs;
@@ -88,7 +154,8 @@ public class PathfindingNavigation {
 	public static int getSafeTopY(ServerWorld world, int x, int z, int fallbackY) {
 		int chunkX = x >> 4;
 		int chunkZ = z >> 4;
-		Chunk chunk = (Chunk) world.getChunkManager().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+		// V5.59: 改走非阻塞 getChunkIfReady,避免 vanilla getChunk(FULL,false) 在主线程上 pump 任务队列
+		WorldChunk chunk = getChunkIfReady(world, chunkX, chunkZ);
 		if (chunk == null) return fallbackY;
 		int localX = x & 15;
 		int localZ = z & 15;
@@ -108,7 +175,9 @@ public class PathfindingNavigation {
 	public static int getSafeSpawnY(ServerWorld world, int x, int z, int fallbackY) {
 		int chunkX = x >> 4;
 		int chunkZ = z >> 4;
-		Chunk chunk = (Chunk) world.getChunkManager().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+		// V5.59: 改走非阻塞 getChunkIfReady。watchdog 抓到的 bot spawn 卡 1.148s 就来自此条路径,
+		//   旧实现 getChunk(FULL,false) 在 4-slot 缓存 miss 时 pump 整个 task 队列,极端能 17 秒。
+		WorldChunk chunk = getChunkIfReady(world, chunkX, chunkZ);
 		if (chunk == null) return fallbackY;
 		int localX = x & 15;
 		int localZ = z & 15;
@@ -206,7 +275,9 @@ public class PathfindingNavigation {
 	public static boolean isChunkFullyLoaded(ServerWorld world, BlockPos pos) {
 		int chunkX = pos.getX() >> 4;
 		int chunkZ = pos.getZ() >> 4;
-		return world.getChunkManager().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false) != null;
+		// V5.59: 改走非阻塞 getChunkIfReady。本方法在 A* / doSmartMove 热路径每次邻居枚举都调,
+		//   旧实现潜在的 task pump 会让 100 bot 同时寻路场景下产生主线程级联 park。
+		return getChunkIfReady(world, chunkX, chunkZ) != null;
 	}
 
 	/**

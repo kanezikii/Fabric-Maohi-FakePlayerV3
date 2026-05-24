@@ -984,6 +984,12 @@ public class MovementController {
 			for (int dz = -1; dz <= 1; dz++) {
 				int cx = botCx + dx;
 				int cz = botCz + dz;
+				// V5.59: chunk 未就绪即跳过本次 force。setChunkForced(true) 内部走
+				//   chunkManager.addTicket + getChunk(FULL,true),后者在 gen 未完成时 pump
+				//   主线程任务队列 → watchdog 抓到 maohiBotForceLoadRing:989 卡 ~1s。
+				//   策略:只 force 已 FULL 的 chunk(addTicket 路径快);未就绪由 bot 自身 player ticket
+				//   走异步加载,下个 5s ring tick 再补 force。
+				if (!PathfindingNavigation.isChunkReady(world, cx, cz)) continue;
 				long packed = ((long) cx << 32) | (cz & 0xFFFFFFFFL);
 				if (pers.botForcedChunks.add(packed)) {
 					try { world.setChunkForced(cx, cz, true); } catch (Throwable ignored) {}
