@@ -108,6 +108,15 @@ public class StripMineBehavior {
         BlockPos nextHead = nextFoot.up();
         BlockPos nextTop = nextHead.up(); // 对于 2 格高
 
+        // V5.59: chunk-not-ready 守卫 — 避免被 isHazardousBlock"未加载即危险"语义误判为岩浆。
+        //   旧链路:未加载 chunk → isHazardousBlock=true → placeCobble(与未加载 chunk 交互再次 park
+        //   主线程)+ abort lava_ahead(30min 冷却惩罚)。
+        //   新行为:未就绪即返,等下一 tick 重试,bot 自身坐标 chunk 必已加载,前方 chunk 加载完
+        //   立即恢复正常挖矿决策。
+        if (!PathfindingNavigation.isChunkReady(world, nextFoot.getX() >> 4, nextFoot.getZ() >> 4)) {
+            return;
+        }
+
         // 检测前方流体危险
         if (PathfindingNavigation.isHazardousBlock(world, nextFoot) || PathfindingNavigation.isHazardousBlock(world, nextHead)) {
             placeCobble(player, nextFoot);
@@ -180,6 +189,12 @@ public class StripMineBehavior {
         Direction facing = pers.stripMineFacing;
         BlockPos nextFoot = pos.offset(facing);
         BlockPos nextHead = nextFoot.up();
+
+        // V5.59: 同 tickDescend — chunk-not-ready 不应进入 isHazardousBlock + placeCobble + 失败计数链路。
+        //   未就绪即返,等下一 tick 重试,避免无意义放方块/累计 consecutiveFails 提前 abort blocked_layer。
+        if (!PathfindingNavigation.isChunkReady(world, nextFoot.getX() >> 4, nextFoot.getZ() >> 4)) {
+            return;
+        }
 
         if (PathfindingNavigation.isHazardousBlock(world, nextFoot) || PathfindingNavigation.isHazardousBlock(world, nextHead)) {
             placeCobble(player, nextFoot);

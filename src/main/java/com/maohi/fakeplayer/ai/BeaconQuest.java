@@ -73,10 +73,15 @@ public final class BeaconQuest {
         // V5.20 修复：同时扫 X 和 Z 轴（之前只扫 X 漏检 75% 方向）
         boolean found = false;
         BlockPos current = player.getBlockPos();
+        // V5.59: chunk-level 预检 — ±32 step=8 跨 ~5×5 chunks。下界冷区块生成开销极大,
+        //   raw getBlockState 命中未加载 chunk 即 park 主线程数秒。
         outer:
         for (int dx = -32; dx <= 32; dx += 8) {
             for (int dz = -32; dz <= 32; dz += 8) {
-                BlockPos check = current.add(dx, 0, dz);
+                int worldX = current.getX() + dx;
+                int worldZ = current.getZ() + dz;
+                if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
+                BlockPos check = new BlockPos(worldX, current.getY(), worldZ);
                 if (world.getBlockState(check).isOf(Blocks.NETHER_BRICKS)) {
                     found = true;
                     break outer;
@@ -499,15 +504,18 @@ public final class BeaconQuest {
     private static BlockPos findNearestBlock(ServerWorld world, BlockPos center, int radius, net.minecraft.block.Block block) {
         // V5.20 优化：从中心向外按距离扩散搜索，找到第一块即返回
         // 替代之前 (-r..r) 立方体扫描，平均扫描量降到约 1/8
+        // V5.59: chunk-level 预检 — radius 高达 16/32 时跨 3~5 chunks,nether/end 冷区块生成开销极大。
+        //   循环顺序由 r→y→x→z 改为 r→x→z→y(y 不影响 chunk),让 chunk 预检在 (x, z) 维度只跑一次。
         BlockPos.Mutable mut = new BlockPos.Mutable();
         for (int r = 0; r <= radius; r++) {
-            for (int y = -3; y <= 3; y++) {
-                // 上下两个面（仅在最外层 r 时扫描整个面，否则只扫框）
-                for (int x = -r; x <= r; x++) {
-                    for (int z = -r; z <= r; z++) {
-                        // 只检查当前 r 圈层的边界，避免重复扫描内层
-                        if (r > 0 && Math.abs(x) != r && Math.abs(z) != r) continue;
-                        mut.set(center.getX() + x, center.getY() + y, center.getZ() + z);
+            for (int x = -r; x <= r; x++) {
+                for (int z = -r; z <= r; z++) {
+                    if (r > 0 && Math.abs(x) != r && Math.abs(z) != r) continue;
+                    int worldX = center.getX() + x;
+                    int worldZ = center.getZ() + z;
+                    if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
+                    for (int y = -3; y <= 3; y++) {
+                        mut.set(worldX, center.getY() + y, worldZ);
                         if (world.getBlockState(mut).isOf(block)) return mut.toImmutable();
                     }
                 }

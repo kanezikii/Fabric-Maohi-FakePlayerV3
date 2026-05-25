@@ -271,10 +271,16 @@ public final class PhaseEnderDragon implements Phase {
         BlockPos.Mutable mut = new BlockPos.Mutable();
         BlockPos firstFound = null;
         BlockPos firstUnlit = null;
+        // V5.59: chunk-level 预检 — ±24 step=2 跨 ~6×6 chunks。要塞末地传送门常在远端,
+        //   bot 接近时可能尚未触及全部 chunks。循环顺序由 dx→dy→dz 改为 dx→dz→dy
+        //   (dy 不影响 chunk),让 chunk 预检在 (dx, dz) 维度只跑一次。
         for (int dx = -24; dx <= 24; dx += 2) {
-            for (int dy = -12; dy <= 12; dy++) {
-                for (int dz = -24; dz <= 24; dz += 2) {
-                    mut.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+            for (int dz = -24; dz <= 24; dz += 2) {
+                int worldX = center.getX() + dx;
+                int worldZ = center.getZ() + dz;
+                if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
+                for (int dy = -12; dy <= 12; dy++) {
+                    mut.set(worldX, center.getY() + dy, worldZ);
                     BlockState state = world.getBlockState(mut);
                     if (state.isOf(Blocks.END_PORTAL_FRAME)) {
                         if (firstFound == null) firstFound = mut.toImmutable();
@@ -439,13 +445,19 @@ public final class PhaseEnderDragon implements Phase {
         BlockPos center = new BlockPos(0, 65, 0);
 
         // 扫描 ±8 查找真正的 EndPortalBlock 位置(基岩顶上)
+        // V5.59: chunk-level 预检 — bot 可能仍在出生黑曜石平台 (100, 49, 0),主岛中心 (0, 65, 0)
+        //   附近 chunks 可能未加载。raw getBlockState 触发 vanilla getChunk(FULL,true) → park 数秒。
+        //   循环顺序由 dy→dx→dz 改为 dx→dz→dy(dy 不影响 chunk),chunk 预检在 (dx, dz) 维度只跑一次。
         BlockPos.Mutable mut = new BlockPos.Mutable();
         BlockPos portalPos = null;
         scanLoop:
-        for (int dy = -8; dy <= 8; dy++) {
-            for (int dx = -4; dx <= 4; dx++) {
-                for (int dz = -4; dz <= 4; dz++) {
-                    mut.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dz = -4; dz <= 4; dz++) {
+                int worldX = center.getX() + dx;
+                int worldZ = center.getZ() + dz;
+                if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
+                for (int dy = -8; dy <= 8; dy++) {
+                    mut.set(worldX, center.getY() + dy, worldZ);
                     if (world.getBlockState(mut).getBlock() instanceof EndPortalBlock) {
                         portalPos = mut.toImmutable();
                         break scanLoop;

@@ -253,8 +253,13 @@ public final class PhaseNether implements Phase {
         long now = System.currentTimeMillis();
         if (c.portal != null && now - c.portalCachedAt < SCAN_CACHE_TTL_MS) {
             // 校验缓存仍然指向真传送门(可能已被破坏)
-            if (world.getBlockState(c.portal.up()).getBlock() instanceof NetherPortalBlock
-                || world.getBlockState(c.portal).isOf(Blocks.OBSIDIAN)) {
+            // V5.59: safeGetBlockState — null(chunk 已被卸载)即视为缓存失效,重新扫描
+            net.minecraft.block.BlockState upState =
+                com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(world, c.portal.up());
+            net.minecraft.block.BlockState selfState =
+                com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(world, c.portal);
+            if ((upState != null && upState.getBlock() instanceof NetherPortalBlock)
+                || (selfState != null && selfState.isOf(Blocks.OBSIDIAN))) {
                 return c.portal;
             }
             // 失效,清掉
@@ -275,7 +280,10 @@ public final class PhaseNether implements Phase {
         ScanCache c = SCAN_CACHE.computeIfAbsent(player.getUuid(), k -> new ScanCache());
         long now = System.currentTimeMillis();
         if (c.debris != null && now - c.debrisCachedAt < SCAN_CACHE_TTL_MS) {
-            if (world.getBlockState(c.debris).isOf(Blocks.ANCIENT_DEBRIS)) return c.debris;
+            // V5.59: safeGetBlockState — null(chunk 已被卸载)即视为缓存失效,重新扫描
+            net.minecraft.block.BlockState dState =
+                com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(world, c.debris);
+            if (dState != null && dState.isOf(Blocks.ANCIENT_DEBRIS)) return c.debris;
             c.debris = null;
         }
         BlockPos found = findAncientDebris(world, player.getBlockPos());
@@ -287,10 +295,17 @@ public final class PhaseNether implements Phase {
     /** 搜索附近现有的下界传送门 */
     private static BlockPos findNearbyPortal(ServerWorld world, BlockPos center) {
         BlockPos.Mutable mut = new BlockPos.Mutable();
+        // V5.59: chunk-level 预检 — ±24 半径 step=2 跨 ~6×6 chunks,nether 中冷 chunk 多。
+        //   raw getBlockState 触发 vanilla getChunk(FULL,true) pump 主线程任务队列 → park 1+s。
+        //   (dx, dz) 外层加 isChunkReady gate,未就绪即跳过整列 dy。注意循环顺序由 dx→dy→dz
+        //   改为 dx→dz→dy,因为 dy 不影响 chunk 坐标,放最内层让 chunk 预检在 (dx,dz) 维度只跑一次。
         for (int dx = -PORTAL_SCAN_RADIUS; dx <= PORTAL_SCAN_RADIUS; dx += 2) {
-            for (int dy = -PORTAL_SCAN_Y_RANGE; dy <= PORTAL_SCAN_Y_RANGE; dy++) {
-                for (int dz = -PORTAL_SCAN_RADIUS; dz <= PORTAL_SCAN_RADIUS; dz += 2) {
-                    mut.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+            for (int dz = -PORTAL_SCAN_RADIUS; dz <= PORTAL_SCAN_RADIUS; dz += 2) {
+                int worldX = center.getX() + dx;
+                int worldZ = center.getZ() + dz;
+                if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
+                for (int dy = -PORTAL_SCAN_Y_RANGE; dy <= PORTAL_SCAN_Y_RANGE; dy++) {
+                    mut.set(worldX, center.getY() + dy, worldZ);
                     BlockState state = world.getBlockState(mut);
                     if (state.getBlock() instanceof NetherPortalBlock) {
                         return findPortalBase(world, mut.toImmutable());
@@ -303,15 +318,23 @@ public final class PhaseNether implements Phase {
 
     /** 找到传送门的底部中心位置 */
     private static BlockPos findPortalBase(ServerWorld world, BlockPos portalPos) {
+        // V5.59: while 循环沿 -Y / -X / -Z 追溯,west/north 可能跨入未加载 chunk → park。
+        //   safeGetBlockState 返 null 即 break — 在能确认的范围内找到角落即可。
         BlockPos down = portalPos;
-        while (world.getBlockState(down.down()).getBlock() instanceof NetherPortalBlock) {
+        while (true) {
+            net.minecraft.block.BlockState st = com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(world, down.down());
+            if (st == null || !(st.getBlock() instanceof NetherPortalBlock)) break;
             down = down.down();
         }
         BlockPos corner = down;
-        while (world.getBlockState(corner.west()).getBlock() instanceof NetherPortalBlock) {
+        while (true) {
+            net.minecraft.block.BlockState st = com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(world, corner.west());
+            if (st == null || !(st.getBlock() instanceof NetherPortalBlock)) break;
             corner = corner.west();
         }
-        while (world.getBlockState(corner.north()).getBlock() instanceof NetherPortalBlock) {
+        while (true) {
+            net.minecraft.block.BlockState st = com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(world, corner.north());
+            if (st == null || !(st.getBlock() instanceof NetherPortalBlock)) break;
             corner = corner.north();
         }
         return corner.down();
@@ -377,6 +400,12 @@ public final class PhaseNether implements Phase {
     }
 
     private static boolean isValidPortalBuildLocation(ServerWorld world, BlockPos base) {
+        // V5.59: 4×5 检查范围沿 +X 跨 0~3 格,bot 站 chunk 边缘时 base.add(3,*,0) 可能跨入相邻 chunk。
+        //   一次性 chunk-ready 守卫,base 和 base+3 各一次(同 z),覆盖整个建造框架。未就绪即拒,
+        //   findPortalBuildSpot 自然换下一个候选。
+        net.minecraft.server.world.ServerWorld sw = world;
+        if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(sw, base.getX() >> 4, base.getZ() >> 4)) return false;
+        if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(sw, (base.getX() + 3) >> 4, base.getZ() >> 4)) return false;
         for (int x = 0; x < 4; x++) {
             for (int y = 0; y < 5; y++) {
                 BlockPos check = base.add(x, y, 0);
@@ -474,12 +503,18 @@ public final class PhaseNether implements Phase {
         BlockPos.Mutable mut = new BlockPos.Mutable();
         // 锁定扫描 Y 中心:DEBRIS_TARGET_Y;但若玩家已在合理深度,以玩家 Y 为中心更合理
         int scanCenterY = MathHelper.clamp(center.getY(), DEBRIS_Y_MIN, DEBRIS_Y_MAX);
-        for (int dy = -5; dy <= 5; dy++) {
-            int y = scanCenterY + dy;
-            if (y < DEBRIS_Y_MIN || y > DEBRIS_Y_MAX) continue;
-            for (int dx = -DEBRIS_SCAN_RADIUS; dx <= DEBRIS_SCAN_RADIUS; dx += 2) {
-                for (int dz = -DEBRIS_SCAN_RADIUS; dz <= DEBRIS_SCAN_RADIUS; dz += 2) {
-                    mut.set(center.getX() + dx, y, center.getZ() + dz);
+        // V5.59: chunk-level 预检 — DEBRIS_SCAN_RADIUS=12 step=2 跨 ~3×3 chunks。
+        //   循环顺序由 dy→dx→dz 重排为 dx→dz→dy:dy 不影响 chunk 坐标,放最内层让 chunk 预检
+        //   在 (dx, dz) 维度只跑一次。
+        for (int dx = -DEBRIS_SCAN_RADIUS; dx <= DEBRIS_SCAN_RADIUS; dx += 2) {
+            for (int dz = -DEBRIS_SCAN_RADIUS; dz <= DEBRIS_SCAN_RADIUS; dz += 2) {
+                int worldX = center.getX() + dx;
+                int worldZ = center.getZ() + dz;
+                if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
+                for (int dy = -5; dy <= 5; dy++) {
+                    int y = scanCenterY + dy;
+                    if (y < DEBRIS_Y_MIN || y > DEBRIS_Y_MAX) continue;
+                    mut.set(worldX, y, worldZ);
                     if (world.getBlockState(mut).isOf(Blocks.ANCIENT_DEBRIS)) {
                         return mut.toImmutable();
                     }

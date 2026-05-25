@@ -277,6 +277,11 @@ public class ActionSimulator {
 
 		for (int dx = -2; dx <= 2; dx++) {
 			for (int dz = -2; dz <= 2; dz++) {
+				int worldX = pos.getX() + dx;
+				int worldZ = pos.getZ() + dz;
+				// V5.59: chunk-level 预检 — 未就绪即跳过整列 3 个 dy,避免 raw getBlockState 在
+				//   bot 站 chunk 边缘 ±2 范围跨入未加载 chunk 时 pump 主线程任务队列。
+				if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
 				for (int dy = -1; dy <= 1; dy++) {
 					BlockPos checkPos = pos.add(dx, dy, dz);
 					net.minecraft.block.BlockState state = world.getBlockState(checkPos);
@@ -335,27 +340,36 @@ public class ActionSimulator {
 		if (ThreadLocalRandom.current().nextInt(2000) != 0) return; // 极低频率
 
 		BlockPos pos = player.getBlockPos();
-		net.minecraft.world.World world = player.getEntityWorld();
-		
+		net.minecraft.server.world.ServerWorld world =
+			(net.minecraft.server.world.ServerWorld) player.getEntityWorld();
+
 		// 寻找可以放告示牌的地面
 		BlockPos signPos = pos.offset(player.getHorizontalFacing());
-		if (world.getBlockState(signPos).isAir() && !world.getBlockState(signPos.down()).isAir()) {
+		// V5.59: NSEW offset 跨相邻 chunk 风险 — bot 站 chunk 边缘朝外时 signPos/signPos.down()
+		//   落在下一 chunk,raw getBlockState 触发 vanilla getChunk(FULL,true) → 主线程 park
+		//   1186ms (watchdog 抓到)。safeGetBlockState 未就绪返 null → 视为不放置,bot 下次
+		//   tick 再尝试(本方法频率 1/2000,影响可忽略)。
+		net.minecraft.block.BlockState signState =
+			com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(world, signPos);
+		net.minecraft.block.BlockState belowState =
+			com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(world, signPos.down());
+		if (signState != null && signState.isAir() && belowState != null && !belowState.isAir()) {
 			// 放置告示牌方块
 			world.setBlockState(signPos, net.minecraft.block.Blocks.OAK_SIGN.getDefaultState());
-			
+
 			// 随机留言内容
 			String[] messages = {
-				"I was here!", "So many zombies...", "Diamond found!", 
+				"I was here!", "So many zombies...", "Diamond found!",
 				"Nice place.", "Need more food", "Help!", "Mining day 1"
 			};
 			String text = messages[ThreadLocalRandom.current().nextInt(messages.length)];
-			
+
 			// 设置告示牌文字 (1.21.11 机制)
 			net.minecraft.block.entity.BlockEntity be = world.getBlockEntity(signPos);
 			if (be instanceof net.minecraft.block.entity.SignBlockEntity sign) {
 				sign.setText(new net.minecraft.block.entity.SignText().withMessage(0, net.minecraft.text.Text.literal(text)), true);
 			}
-			
+
 			// 动作模拟
 			com.maohi.fakeplayer.network.PacketHelper.swingHand(player, net.minecraft.util.Hand.MAIN_HAND);
 		}
@@ -391,10 +405,17 @@ public class ActionSimulator {
 			pers.aestheticTicks = 100 + ThreadLocalRandom.current().nextInt(200); // 持续 5-10 秒
 			// 寻找附近需要填平的小坑或高差
 			BlockPos pos = player.getBlockPos();
+			net.minecraft.server.world.ServerWorld world =
+				(net.minecraft.server.world.ServerWorld) player.getEntityWorld();
 			for (int x = -3; x <= 3; x++) {
 				for (int z = -3; z <= 3; z++) {
+					int worldX = pos.getX() + x;
+					int worldZ = pos.getZ() + z;
+					// V5.59: chunk-level 预检 — 未就绪即跳过该 (x, z),避免 raw getBlockState 在
+					//   bot 站 chunk 边缘 ±3 范围跨入未加载 chunk 时 pump 主线程任务队列。
+					if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
 					BlockPos ground = pos.add(x, -1, z);
-					if (player.getEntityWorld().getBlockState(ground).isAir() && !player.getEntityWorld().getBlockState(ground.down()).isAir()) {
+					if (world.getBlockState(ground).isAir() && !world.getBlockState(ground.down()).isAir()) {
 						pers.aestheticTarget = ground; // 发现一个坑
 						return;
 					}

@@ -2722,11 +2722,15 @@ prepareAndSpawnVirtualPlayer();
             BlockPos mineTarget = com.maohi.fakeplayer.ai.ActionSimulator.maybeMistakeDig(personality.taskTarget);
             net.minecraft.util.math.Direction mineDir = getDirectionFromYaw(p.getYaw());
 
-            net.minecraft.block.BlockState targetState = p.getEntityWorld().getBlockState(mineTarget);
+            net.minecraft.block.BlockState targetState =
+                com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(
+                    (net.minecraft.server.world.ServerWorld) p.getEntityWorld(), mineTarget);
 
             // V5.30 目标已变空气(树被砍/方块被别人挖走/原本就是 phantom 目标)→ 计失败 + 放弃,
             //   不让 mining 状态机走"硬度 0 → 1 tick 完成 → blocksMinedTotal++"的伪成功路径。
-            if (targetState.isAir()) {
+            // V5.59: targetState=null 表示 chunk 未加载 — 同样无法继续,走相同 fail 路径(语义等同 air)。
+            //   避免 raw getBlockState 在 mineTarget 所在 chunk 未就绪时 pump 主线程任务队列。
+            if (targetState == null || targetState.isAir()) {
                 com.maohi.fakeplayer.TaskLogger.log(p, "task_fail",
                     "reason", "target_is_air", "task", personality.currentTask, "target", mineTarget);
                 com.maohi.fakeplayer.TaskMetrics.countTaskFail(p.getUuid(), "target_is_air");
@@ -2821,8 +2825,15 @@ prepareAndSpawnVirtualPlayer();
                 server.execute(() -> com.maohi.fakeplayer.network.PacketHelper.finishDestroyBlock(p, finalMinePos, finalMineDir));
 
                 // 缓存失效：防止假人返回已挖掘的坐标 (P2)
-                String minedType = net.minecraft.registry.Registries.BLOCK.getId(p.getEntityWorld().getBlockState(finalMinePos).getBlock()).getPath();
-                blockScanCache.invalidate(finalMinePos, minedType);
+                // V5.59: safeGetBlockState 避免 raw getBlockState 在 chunk 未加载时 pump 主线程任务队列;
+                //   null(chunk 已被卸载)即跳过 invalidate,cache 自然 30s TTL 过期。
+                net.minecraft.block.BlockState postBreakState =
+                    com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(
+                        (net.minecraft.server.world.ServerWorld) p.getEntityWorld(), finalMinePos);
+                if (postBreakState != null) {
+                    String minedType = net.minecraft.registry.Registries.BLOCK.getId(postBreakState.getBlock()).getPath();
+                    blockScanCache.invalidate(finalMinePos, minedType);
+                }
 
                 // P22 终极兜底:直接记账,完全不依赖 vanilla advancement registry。
                 //   背景:1.21.11 vanilla advancement loader 上 "story/mine_wood" 等 ID 都找不到
@@ -2975,8 +2986,11 @@ prepareAndSpawnVirtualPlayer();
 
                 if (personality.currentTask == TaskType.MINING) {
                     // 【V5.5 加固】钻石挖掘真实性二次校验
-                    net.minecraft.block.BlockState beforeState = p.getEntityWorld().getBlockState(finalMinePos);
-                    if (com.maohi.fakeplayer.ai.phase.PhaseDiamondAge.isDiamondOre(beforeState)) {
+                    // V5.59: safeGetBlockState — null(chunk 未加载)即跳过校验,绝不阻塞主线程。
+                    net.minecraft.block.BlockState beforeState =
+                        com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(
+                            (net.minecraft.server.world.ServerWorld) p.getEntityWorld(), finalMinePos);
+                    if (beforeState != null && com.maohi.fakeplayer.ai.phase.PhaseDiamondAge.isDiamondOre(beforeState)) {
                         // 方块破坏后（PacketHelper.finishDestroyBlock 是异步发包，但在服务端逻辑中此时方块状态已更新或即将更新）
                         // 为确保物理真实性，我们在状态确认后标记证据
                         com.maohi.fakeplayer.ai.phase.PhaseDiamondAge.markDiamondOreMined(p, personality);

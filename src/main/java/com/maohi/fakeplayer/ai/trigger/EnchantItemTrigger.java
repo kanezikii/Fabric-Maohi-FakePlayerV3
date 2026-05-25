@@ -196,8 +196,13 @@ public final class EnchantItemTrigger implements AchievementTrigger {
 			for (int dx = -d; dx <= d; dx++) {
 				for (int dz = -d; dz <= d; dz++) {
 					if (Math.max(Math.abs(dx), Math.abs(dz)) != d) continue;
+					int worldX = center.getX() + dx;
+					int worldZ = center.getZ() + dz;
+					// V5.59: chunk-level 预检 — radius=8 时 bot 站基地边缘可能跨入未加载 chunk。
+					//   raw getBlockState 触发 vanilla getChunk(FULL,true) pump 主线程任务队列。
+					if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
 					for (int dy = -3; dy <= 3; dy++) {
-						mut.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+						mut.set(worldX, center.getY() + dy, worldZ);
 						if (world.getBlockState(mut).isOf(Blocks.ENCHANTING_TABLE)) {
 							return mut.toImmutable();
 						}

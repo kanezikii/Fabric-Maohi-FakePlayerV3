@@ -941,6 +941,9 @@ public class MovementController {
 
 	/** isSpawnSupported 的轻量版：当前格+头顶 air，脚下固体 */
 	private static boolean isNudgeSafe(ServerWorld world, BlockPos pos) {
+		// V5.59: chunk-ready 预检 — pos / up() / down() 同属一个 (chunkX, chunkZ),一次检查
+		//   保护下面 5 个 getBlockState。未加载即视为不安全,findNudgePosition 自然找下一格。
+		if (!PathfindingNavigation.isChunkReady(world, pos.getX() >> 4, pos.getZ() >> 4)) return false;
 		return world.getBlockState(pos).isAir()
 			&& world.getBlockState(pos.up()).isAir()
 			&& !world.getBlockState(pos.down()).isAir()

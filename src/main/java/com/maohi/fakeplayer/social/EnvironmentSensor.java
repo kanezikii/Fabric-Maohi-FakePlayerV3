@@ -172,8 +172,13 @@ public class EnvironmentSensor {
 		BlockPos nearest = null;
 		double nearestDistSq = Double.MAX_VALUE;
 
+		// V5.59: chunk-level 预检 — ±10 半径跨 ~3×3 chunks,bot 站 chunk 边缘容易命中未加载。
+		//   raw getBlockState 在未加载 chunk 上触发 vanilla getChunk(FULL,true) → 主线程 park。
 		for (int dx = -10; dx <= 10; dx += 2) {
 			for (int dz = -10; dz <= 10; dz += 2) {
+				int worldX = pos.getX() + dx;
+				int worldZ = pos.getZ() + dz;
+				if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
 				for (int dy = -2; dy <= 2; dy++) {
 					BlockPos check = pos.add(dx, dy, dz);
 					if (world.getBlockState(check).getBlock() instanceof BedBlock) {
@@ -228,8 +233,14 @@ public class EnvironmentSensor {
 
 		// V5.28.6: step=4 避免 50^2 范围内每格都查方块状态(50*50*3 ≈ 7500 query)
 		//   step=4 下 ~470 query,可接受;真人着火也是大致目测水源,精确到块没必要
+		// V5.59: chunk-level 预检 — ±50 半径必跨 ~12×12 chunks,大概率命中未加载 chunk。
+		//   raw getBlockState 触发 vanilla getChunk(FULL,true) pump 主线程任务队列 → park 1+s。
+		//   (dx, dz) 外层加 isChunkReady gate,未就绪即跳过整列 3 个 dy。
 		for (int dx = -50; dx <= 50; dx += 4) {
 			for (int dz = -50; dz <= 50; dz += 4) {
+				int worldX = pos.getX() + dx;
+				int worldZ = pos.getZ() + dz;
+				if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, worldX >> 4, worldZ >> 4)) continue;
 				for (int dy = -1; dy <= 1; dy++) {
 					BlockPos check = pos.add(dx, dy, dz);
 					if (world.getBlockState(check).getFluidState().isStill()
