@@ -16,6 +16,16 @@ accessible field net/minecraft/entity/LivingEntity jumping Z
 # 允许修改选中的快捷栏索引
 accessible field net/minecraft/entity/player/PlayerInventory selectedSlot I
 
+# V5.59 cold-chunk 异步救援:暴露 ServerChunkManager.addTicket / removeTicket(ChunkTicketType, ChunkPos, int)
+# 用于 PlayerSpawner.tryDetectColdChunk 绕过 setChunkForced(true) 的同步 chunk 加载等待。
+# vanilla setChunkForced 内部走 chunk.addTicket + getChunk(FULL,true),后者在 cold chunk 上
+# park 主线程 1+s(watchdog 抓到 1168ms)。直接调 addTicket 只注册 FORCED ticket,vanilla
+# chunk worker thread 异步加载,主线程零 park。
+# 配对释放:VPM.releaseForcedSpawnChunks 走 removeTicket 而非 setChunkForced(false) — 后者
+# 依赖 ServerWorld.forcedChunks set 已记账,我们跳过了 vanilla set 注册,要走对称 API 路径释放。
+accessible method net/minecraft/server/world/ServerChunkManager addTicket (Lnet/minecraft/server/world/ChunkTicketType;Lnet/minecraft/util/math/ChunkPos;I)V
+accessible method net/minecraft/server/world/ServerChunkManager removeTicket (Lnet/minecraft/server/world/ChunkTicketType;Lnet/minecraft/util/math/ChunkPos;I)V
+
 # NOTE: 以下字段在 1.21.11 中已被移除或迁移至匿名内部类，无法通过 AW 打开
 # ServerPlayerInteractionManager 的 mining/miningPos/startMiningTime/tickCounter
 # 已迁移至内部状态机，通过 processBlockBreakingAction 公开方法访问即可

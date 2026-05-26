@@ -604,7 +604,23 @@ public class PlayerSpawner {
             net.minecraft.nbt.NbtIo.writeCompressed(nbt, playerFile.toPath());
 
             // 异步加载目标冷区块 + V5.57 (4) 记账给 VPM,/maohi off / stop 兜底释放
-            world.setChunkForced(cx, cz, true);
+            // V5.59 彻底修复:直接调 ServerChunkManager.addTicket(FORCED, pos, 31) 注册 ticket,
+            //   跳过 vanilla setChunkForced 内部的 getChunk(FULL,true) 同步等待 → 主线程零 park。
+            //   vanilla setChunkForced 流程:
+            //     1) ForcedChunkState.add(pos)         // 持久化到 level.dat,server 重启后保留
+            //     2) markDirty
+            //     3) chunkManager.setChunkForced(pos, true) {
+            //          ticketManager.addTicket(FORCED, pos, 31)  // 注册 ticket(异步)
+            //          this.getChunk(cx, cz, FULL, true)         // 同步等 chunk 到 FULL ← 元凶!
+            //        }
+            //   本方案只做 (3) 的 addTicket 一步,跳过 (1)(2) 持久化和 (3) 的同步等待。
+            //   代价:server 重启后该 FORCED ticket 丢失 — 但 cold chunk 救援本身是 bot 上线触发,
+            //   bot 下次上线会重新跑 tryDetectColdChunk 再次注册,功能等价。VPM 端的
+            //   forcedSpawnChunks set 仍维护,/maohi off / stop 时通过 removeTicket 兜底释放。
+            //   AccessWidener 已在 maohi.accesswidener 暴露 addTicket(ChunkTicketType, ChunkPos, int)。
+            net.minecraft.util.math.ChunkPos chunkPos = new net.minecraft.util.math.ChunkPos(cx, cz);
+            world.getChunkManager().addTicket(
+                net.minecraft.server.world.ChunkTicketType.FORCED, chunkPos, 31);
             if (manager != null) {
                 manager.addForcedSpawnChunk(((long) cx << 32) | (cz & 0xFFFFFFFFL));
             }

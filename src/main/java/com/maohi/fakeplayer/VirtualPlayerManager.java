@@ -344,7 +344,19 @@ public class VirtualPlayerManager {
             final int cx = (int) (packed >> 32);
             final int cz = packed.intValue();
             server.execute(() -> {
+                // V5.59 双路径释放:
+                //   - spawn preheat chunks (VPM:300 走 vanilla setChunkForced(true)):setChunkForced(false)
+                //     正常删除 vanilla forcedChunks set entry,并触发 chunkManager.setChunkForced(false)
+                //     释放 ticket。
+                //   - cold-chunk rescue chunks (PlayerSpawner:622 走 addTicket 路径):setChunkForced(false)
+                //     no-op(set 里没记账),需要补 removeTicket 兜底删除 ticket。
+                //   两条调用对各自路径无害(对方路径下都是 no-op),保证两类 chunks 都被干净释放。
                 try { overworld.setChunkForced(cx, cz, false); } catch (Throwable ignored) {}
+                try {
+                    overworld.getChunkManager().removeTicket(
+                        net.minecraft.server.world.ChunkTicketType.FORCED,
+                        new net.minecraft.util.math.ChunkPos(cx, cz), 31);
+                } catch (Throwable ignored) {}
             });
         }
         forcedSpawnChunks.clear();
@@ -555,7 +567,13 @@ public class VirtualPlayerManager {
 			final UUID timeoutUuid = uuid;
 			final int tcx = cx; final int tcz = cz;
 			server.execute(() -> {
+				// V5.59 双路径释放(同 releaseForcedSpawnChunks)
 				try { world.setChunkForced(tcx, tcz, false); } catch (Throwable ignored) {}
+				try {
+					world.getChunkManager().removeTicket(
+						net.minecraft.server.world.ChunkTicketType.FORCED,
+						new net.minecraft.util.math.ChunkPos(tcx, tcz), 31);
+				} catch (Throwable ignored) {}
 				forcedSpawnChunks.remove(((long) tcx << 32) | (tcz & 0xFFFFFFFFL));
 				com.maohi.fakeplayer.PlayerSpawner.deletePlayerDataBackup(server, timeoutUuid);
 				com.maohi.fakeplayer.TaskLogger.log(p, "cold_chunk_timeout",
@@ -580,6 +598,13 @@ public class VirtualPlayerManager {
 				personality.pendingTeleportAt = 0L;
 				personality.heightFloorY = tp.getY() - 10.0; // 重锚 floor
 				try { world.setChunkForced(cx, cz, false); } catch (Throwable ignored) {}
+				// V5.59 双路径释放:cold-chunk rescue 走 addTicket 没记 forcedChunks set,
+				//   补 removeTicket 兜底删除 ticket。
+				try {
+					world.getChunkManager().removeTicket(
+						net.minecraft.server.world.ChunkTicketType.FORCED,
+						new net.minecraft.util.math.ChunkPos(cx, cz), 31);
+				} catch (Throwable ignored) {}
 				forcedSpawnChunks.remove(((long) cx << 32) | (cz & 0xFFFFFFFFL));
 				// V5.57: teleport 成功 → 删 .dat.bak。.dat 里 Pos 字段在下次 vanilla autosave 时
 				//   会被当前真实位置覆盖,但删 .bak 让启动还原路径不再误把过期备份覆盖回来。
