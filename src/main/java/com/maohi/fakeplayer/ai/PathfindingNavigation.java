@@ -47,10 +47,22 @@ public class PathfindingNavigation {
 	//   连续 task_fail blocked_no_path,force_explore escalation 累到 6 也救不回)。
 	//   4096 节点覆盖 ~64 格半径,匹配 force_explore 最大 80 格半径。worst-case 单次 ~8ms,
 	//   CPU 富裕 + 5s cache 错峰摊销实际峰值 < 200ms 可承受。
-	private static final int MAX_SEARCH_STEPS = 4096;
+	// 渐进式寻路(Progressive Pathfinding): 4096 → 512。
+	//   设计思想:"平摊寻路"代替"一次性深搜"。512 步已足够 22 格半径,超出时返回
+	//   visited 中离 goal 最近的中继点(partial path),bot 先走到中继点,
+	//   再触发下一次 512 步寻路续接,把原本 ~8ms 的 CPU 峰值按路径段数平摊到多个 tick。
+	//   partial path 只缓存 1s(PATH_CACHE_PARTIAL_TTL_NS),让 bot 走出 8 格分桶后
+	//   立刻重新寻路,而不是拿旧中继点反复走原地踏步。
+	//   对已在 22 格内的短距目标,512 步通常直接命中,行为与旧版完全一致。
+	private static final int MAX_SEARCH_STEPS = 512;
 
-	/** 路径缓存 TTL */
+	/** 路径缓存 TTL(完整路径) */
 	private static final long PATH_CACHE_TTL_NS = 5_000_000_000L; // 5 秒
+	// 渐进式寻路:partial path(超时中继)只缓存 1s。
+	//   bot 走出 8 格分桶(PATH_CACHE_BUCKET)后 cacheKey 变化,自然触发下一段寻路。
+	//   若缓存 5s,bot 走完第一段后会命中过期的旧中继 → 原地打转。
+	/** 部分路径缓存 TTL(渐进式寻路超时中继点) */
+	private static final long PATH_CACHE_PARTIAL_TTL_NS = 1_000_000_000L; // 1 秒
 	/** 缓存条目上限,防止长期运行内存膨胀 */
 	private static final int PATH_CACHE_MAX = 256;
 	/** 起点/终点分桶粒度(8 格内视为同一目标) */
@@ -421,14 +433,19 @@ public class PathfindingNavigation {
 
 		}
 
-		// 搜索超时:返回朝目标方向最近的已访问点(近似路径)
+		// 渐进式寻路:搜索步数耗尽时,返回 visited 中离 goal 最近的中继点(partial path)。
+		//   bot 先走到中继点,走出 8 格分桶后 cacheKey 变化,下一次 findPath 自动从新位置
+		//   续接寻路,把原本 4096 步单次 ~8ms 的 CPU 峰值平摊到多个 tick 各 ~1ms。
+		//   partial path 缓存 1s(PATH_CACHE_PARTIAL_TTL_NS),而不是完整路径的 5s,
+		//   避免 bot 走完第一段后命中旧中继导致原地踏步。
 		if (!visited.isEmpty()) {
 			AStarNode closest = visited.values().stream()
 				.min(Comparator.comparingDouble(n -> heuristic(n.pos, goal)))
 				.orElse(null);
 			if (closest != null && closest.parent != null) {
 				List<BlockPos> path = reconstructPath(closest);
-				PATH_CACHE.put(cacheKey, new CacheEntry(path, nowNs + PATH_CACHE_TTL_NS));
+				// NOTE: partial path 用 1s 短 TTL,完整路径用 5s 长 TTL
+				PATH_CACHE.put(cacheKey, new CacheEntry(path, nowNs + PATH_CACHE_PARTIAL_TTL_NS));
 				return path;
 			}
 		}
