@@ -5,9 +5,11 @@ import net.minecraft.registry.tag.BiomeTags;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.biome.Biome;
 
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * P1: 生物群系先验知识 — 让假人对「哪个 biome 有什么资源」有常识级别的判断。
@@ -28,6 +30,29 @@ import java.util.Optional;
  */
 public final class BiomePrior {
 
+    // ============================================================
+    // V5.62: chunk 级 affinity 缓存 — biome 在 chunk 内永不变化,
+    //   缓存命中即 O(1) 返回,根本不调 world.getBiome。
+    //
+    // 背景:
+    //   ea204f2 之前发现 BiomePrior.getAffinity 调 world.getBiome 在主线程触发
+    //   ServerChunkManager.getChunk(create=true) 同步等待,卡顿 1~50s。
+    //   ea204f2 加了 3x3 isChunkLoaded guard,但仍然抓到 1131ms thread_stall
+    //   (2026-05-27 stack: BiomePrior.getAffinity:52 → getBiome → getChunk → park)。
+    //   原因:vanilla world.isChunkLoaded 状态不够严格,且 BiomeAccess 的 noise
+    //   jittered sampling 偏移可能越界到第 2 圈邻居 chunk。
+    //
+    // 修法:
+    //   - 缓存命中(占大多数,bot 长期停在同一 chunk)直接返回,绕过整条同步路径。
+    //   - 缓存未命中走严格 isChunkReady (PathfindingNavigation mixin,O(1) 非阻塞)
+    //     全部 9 块 ready 才调 world.getBiome,否则返中立 0。
+    //   - 缓存条目用 SENTINEL 标记"未算过该 ResourceType",避免 0 与"未填充"歧义。
+    // ============================================================
+    private static final ConcurrentHashMap<Long, int[]> AFFINITY_CACHE = new ConcurrentHashMap<>();
+    /** 缓存上限:满则整体清空(simple LRU 不值得这复杂度)。4096 chunk ≈ 1024×1024 方块覆盖 */
+    private static final int CACHE_LIMIT = 4096;
+    private static final int SENTINEL = Integer.MIN_VALUE;
+
     /**
      * 从玩家当前站立位置评估该 biome 对「目标资源」的亲和度。
      *
@@ -36,24 +61,9 @@ public final class BiomePrior {
      * @return 亲和度分数：+2=非常好，+1=还行，0=中立，-1=不好，-2=基本没有
      */
     public static int getAffinity(ServerPlayerEntity player, ResourceType resource) {
-        try {
-            ServerWorld world = player.getEntityWorld();
-            BlockPos pos = player.getBlockPos();
-            // 修复: getBiome 内部采用噪声抖动采样(Jittered Sampling)，可能越界查询相邻区块的群系。
-            // 若相邻区块未就绪，会导致主线程触发 create=true 的同步等待生成，造成 1000ms+ 卡顿。
-            // 因此必须确保目标坐标周围 3x3 的区块全部 loaded，防止抖动越界。
-            int cx = pos.getX() >> 4;
-            int cz = pos.getZ() >> 4;
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    if (!world.isChunkLoaded(cx + dx, cz + dz)) return 0;
-                }
-            }
-            RegistryEntry<Biome> biomeEntry = world.getBiome(pos);
-            return computeAffinity(biomeEntry, resource);
-        } catch (Throwable t) {
-            return 0; // chunk 未加载或 API 异常，返回中立
-        }
+        ServerWorld world = player.getEntityWorld();
+        BlockPos pos = player.getBlockPos();
+        return getAffinityCached(world, pos.getX() >> 4, pos.getZ() >> 4, pos, resource);
     }
 
     /**
@@ -61,19 +71,51 @@ public final class BiomePrior {
      * chunk 未加载时回退到 0（中立），不阻塞主线程。
      */
     public static int getAffinityAt(ServerWorld world, int tx, int tz, int ty, ResourceType resource) {
+        return getAffinityCached(world, tx >> 4, tz >> 4, new BlockPos(tx, ty, tz), resource);
+    }
+
+    private static int getAffinityCached(ServerWorld world, int cx, int cz, BlockPos pos, ResourceType resource) {
+        long key = ChunkPos.toLong(cx, cz);
+        int[] cached = AFFINITY_CACHE.get(key);
+        int idx = resource.ordinal();
+        if (cached != null && cached[idx] != SENTINEL) {
+            return cached[idx];
+        }
+        // 缓存未命中 → 严格非阻塞 chunk-ready 检查(mixin O(1) FULL 状态),不阻塞主线程
+        if (!isBiomeSampleReady(world, cx, cz)) return 0;
         try {
-            int cx = tx >> 4;
-            int cz = tz >> 4;
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    if (!world.isChunkLoaded(cx + dx, cz + dz)) return 0;
-                }
+            RegistryEntry<Biome> biomeEntry = world.getBiome(pos);
+            int score = computeAffinity(biomeEntry, resource);
+            int[] arr = cached;
+            if (arr == null) {
+                if (AFFINITY_CACHE.size() >= CACHE_LIMIT) AFFINITY_CACHE.clear();
+                arr = new int[ResourceType.values().length];
+                java.util.Arrays.fill(arr, SENTINEL);
+                int[] prev = AFFINITY_CACHE.putIfAbsent(key, arr);
+                if (prev != null) arr = prev;
             }
-            RegistryEntry<Biome> biomeEntry = world.getBiome(new BlockPos(tx, ty, tz));
-            return computeAffinity(biomeEntry, resource);
+            arr[idx] = score;
+            return score;
         } catch (Throwable t) {
             return 0;
         }
+    }
+
+    /**
+     * BiomeAccess.getBiome 内部 noise jittered sampling 偏移最大约 ±8 方块,
+     * 在 chunk 边界附近会越界采样相邻 chunk。3x3 全部 ready 才安全调 world.getBiome。
+     * 用 PathfindingNavigation.isChunkReady (mixin getChunkHolder → ChunkHolder.getWorldChunk)
+     * 替代 vanilla world.isChunkLoaded,前者是 O(1) 严格状态查,后者在主线程仍可能 pump 任务队列。
+     */
+    private static boolean isBiomeSampleReady(ServerWorld world, int cx, int cz) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (!com.maohi.fakeplayer.ai.PathfindingNavigation.isChunkReady(world, cx + dx, cz + dz)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /**

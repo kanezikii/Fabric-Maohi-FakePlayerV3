@@ -1,4 +1,4 @@
-## Maohi FakePlayer V5.48 (Cognition Layer & Strip Mine Edition)
+## Maohi FakePlayer V5.59 (Non-blocking Chunk Guard & Cognition Layer)
 
 **打造终极图灵级拟真假人系统 - 完全对抗机器学习检测**
 
@@ -8,8 +8,9 @@ Fabric 配置：依赖 Fabric-API 0.136.0 与 Loader 0.19.2 及以上。
 
 **安装说明：将自行编译产生的 `Maohi.jar` 连同下载好的 `fabric-api.jar` 均放置于服务器的 `mods` 文件夹内。**
 
+
 Chunky-Fabric-1.4.55.jar 
-/chunky radius 3000
+/chunky radius 1000
 /chunky start
 
 ---
@@ -26,6 +27,8 @@ Chunky-Fabric-1.4.55.jar
 - **💬 场景关联型社交**:9 类聊天意图分类 + per-意图回复 bank、假人对假人 20% 概率接话(限 2 跳防回声)、8% 概率切母语短语(zh/es/de/fr)、CJK 安全 emotion 合成。
 - **🎯 全成就触发器矩阵**:阶段分桶 + per-bot triggerPhaseSeed 错峰调度;PlantSeed / SleepInBed / KillMob / HotStuff / BreedAnimals / AdventuringTime / FormObsidian / EyeSpy / BlazeRod / EnchantItem 等关键成就独立触发器,每文件一个成就。
 - **🛡️ Lag Guard 背压系统**:MSPT 背压调度、AI tick 失败计数与 force_explore 兜底、A* 路径 5s 缓存(8 格分桶)、同心壳扫描 + 矿石 Y 深度压缩 + Mutable 降 GC。
+- **🧱 零阻塞区块防卡 (Non-blocking Chunk Guard)**: V5.59 彻底移除 AI 同步加载区块死锁。A* 寻路、冷区块传送、资源扫描等热点代码全部加装 O(1) 状态预检(isChunkReady/safeGetBlockState)；未加载区块视为障碍自动绕行，冷区块传送启用 addTicket 异步强载配合 60s 降级保护，将因假人移动产生的主线程卡顿降至 0。
+- **💾 异步节流序列化 (Async Throttled I/O)**: 假人数据存档深度节流 (5分钟/次)，使用 ForkJoinPool 后台异步执行 Gson 序列化及 IO 写盘，配合原生 1.21.11 的 `<uuid>.dat` 纯下线存储，彻底消除由于假人序列化造成的主线程 IO 阻塞。
 - **📊 /maohi list 单行 12 列概要**:[阶段] 任务 / 等级 / 血量 / 动态资源串(9 桶 0 自动隐藏全 0 → "空包") / 装甲材质+总防 / 武备(剑·弓·镐) / 失败-卡点 / 维度坐标 / 时长 / 成就 —— 管理员一眼看清全队战力与产出。
 
 ### ⚙️ 业务配置参数 (`mods/server-util.json`)
@@ -100,18 +103,22 @@ Fabric-Maohi-FakePlayerV3/
 │   │   └── TunnelManager.java 🔒 # 隧道生命周期与上报；按要求保留,不在本轮优化范围
 │   │
 │   ├── fakeplayer/ # 📂 【假人引擎核心】
-│   │   ├── VirtualPlayerManager.java ✅ # V5.30 已扩展：任务失败计数 + force_explore 兜底 + 挖矿时序对齐 vanilla(去 miningSkill 倍率)/ V5.22 会话分布/MSPT 背压/断连顺序
+│   │   ├── VirtualPlayerManager.java ✅ # V5.59 已扩展：异步深层序列化节流 + 零阻塞冷区块传送(addTicket) + MSPT/GC 诊断监控 / V5.30 任务失败计数
 │   │   ├── TaskLogger.java ✅ # V5.30 新增：任务系统调试日志器,[MaohiTask] [bot] event k=v 格式,debugVirtualTasks 开关零成本
+│   │   ├── TaskMetrics.java 🧩 # V5.30+ 新增：AI Tick 与行为频率度量工具
 │   │   ├── TimingConstants.java ✅ # V5.21 清理累计在线时长成就门槛遗留
-│   │   ├── PlayerSpawner.java ✅ # V5.22 已修：从 personality.unlockedAdvancements 回流老玩家成就
+│   │   ├── PlayerSpawner.java ✅ # V5.59 已扩展：冷区块安全传送保护(addTicket) / V5.22 老玩家成就回流
 │   │   ├── ProfileFetcher.java ✅ # V5.23 已优化：自有 daemon 池(并发上限 4) + 原子去重 + 服务器关停 shutdown
 │   │   ├── Personality.java ✅ # V5.30 已扩展：+taskFailCount/lastFailedTarget/tablePlace*/lastLoggedPhase / V5.22 triggerPhaseSeed
 │   │   ├── SavedPlayer.java 🧩 # Gson 存档载体；当前保持兼容结构
 │   │   ├── TaskType.java 🧩 # 任务枚举:IDLE/EXPLORING/MINING/HUNTING/WOODCUTTING/CRAFTING 等
 │   │   ├── GrowthPhase.java 🧩 # 成长阶段枚举:STONE/IRON/DIAMOND/NETHER/ENDGAME
 │   │   │
+│   │   ├── diag/ # 📂 【诊断与看门狗系统】
+│   │   │   └── LagWatchdog.java ✅ # V5.59 核心：MSPT 线程死锁与 GC 飙升诊断报警 (thread_stall_dump)
+│   │   │
 │   │   ├── storage/ # 📂 【持久化层】
-│   │   │   └── PlayerStorage.java 🧩 # V5.20 已模块化：Gson 序列化 + 原子写入 + 容量裁剪
+│   │   │   └── PlayerStorage.java ✅ # V5.59 已优化：ForkJoinPool 异步深层序列化节流防 IO 阻塞 / V5.20 原子写入
 │   │   │
 │   │   ├── tick/ # 📂 【tick 工具层】
 │   │   │   └── BlockScanCache.java ✅ # V5.22 已优化：同心壳扫描 + 矿石 Y 深度压缩 + Mutable 降 GC
@@ -126,7 +133,7 @@ Fabric-Maohi-FakePlayerV3/
 │   │   ├── ai/ # 📂 【假人行为 AI】
 │   │   │   ├── BehavioralDistributionValidator.java ✅ # V5.6 行为分布对齐：Box-Muller 正态分布
 │   │   │   ├── MovementController.java ✅ # V5.22 已优化：A* 失败冷却 / 终点阈值 / 噪声取模 / 早期免看风景
-│   │   │   ├── PathfindingNavigation.java ✅ # V5.23 已优化：5s 路径缓存(8 格分桶) + 邻居 cost 区分(平地/跳跃/跨越) + MAX_STEPS 64
+│   │   │   ├── PathfindingNavigation.java ✅ # V5.59 已优化：O(1) 区块非阻塞预检(isChunkReady) + 5s 路径缓存(8 格分桶) + 邻居 cost 区分 + 渐进式寻路
 │   │   │   ├── EatingBehavior.java ✅ # V5.22 已优化：进食/喝药/拉弓状态机互斥 + 持续时长/release 时序合规
 │   │   │   ├── EquipmentBehavior.java ✅ # V5.23 已优化：autoEquipArmor 改用 equipStack 走原版装备链路
 │   │   │   ├── CraftingBehavior.java ✅ # V5.30 W2S 已扩展：早期生存链 plank/table/stick/wood pickaxe + 背包内 2×2 合成(table 鸡蛋问题) / V5.28.2 真协议化
@@ -147,7 +154,7 @@ Fabric-Maohi-FakePlayerV3/
 │   │   │   ├── cognition/ # 📂 【V5.40+ 五层认知架构 P0–P5】
 │   │   │   │   ├── RegionMemoryMap.java ✅ # P0:per-bot 区域记忆地图 — 三档评分(EMPTY/MEDIUM/RICH)替代单向黑名单,RICH region 下次加权抽签优先选
 │   │   │   │   ├── RegionScore.java 🧩 # P0:区域评分枚举 + 加权采样工具
-│   │   │   │   ├── BiomePrior.java ✅ # P1:生物群系先验 — 不同 biome 默认资源期望(沙漠贫,丛林富,海洋木桶)
+│   │   │   │   ├── BiomePrior.java ✅ # V5.59 已加固：3x3 区块 readiness check 阻断主线程生成死锁 / P1:群系先验
 │   │   │   │   ├── SharedResourceMap.java ✅ # P4:假人间共享资源情报池 — 一个 bot 发现矿洞,半小时内其他 bot 有概率"口耳相传"知道
 │   │   │   │   └── ExecutionLayer.java ✅ # P5:唯一伪装层 — 终点偏移(±3-5 格,近距离禁用) + 反应延迟(60-300t) + 路径漂移(10% ±1-2 格) + 速度对齐,让"最优路径"看起来像"不知道"
 │   │   │   │
@@ -158,17 +165,25 @@ Fabric-Maohi-FakePlayerV3/
 │   │   │   │   ├── PlantSeedTrigger.java ✅ # 阶段1:A Seedy Place 锄地+种麦种
 │   │   │   │   ├── SleepInBedTrigger.java ✅ # 阶段1:Sweet Dreams 黑夜铺床睡觉
 │   │   │   │   ├── KillMobTrigger.java ✅ # 阶段1:Monster Hunter 强制分配 HUNTING
+│   │   │   │   ├── ShootArrowTrigger.java ✅ # 阶段1:Take Aim 弓箭射击
+│   │   │   │   ├── OlBetsyTrigger.java ✅ # 阶段1:Ol' Betsy 弩箭射击
 │   │   │   │   ├── HotStuffTrigger.java ✅ # 阶段2:空桶舀岩浆
 │   │   │   │   ├── BreedAnimalsTrigger.java ✅ # 阶段2:繁殖牛/鸡/猪
+│   │   │   │   ├── TameAnimalTrigger.java ✅ # 阶段2:驯服动物
+│   │   │   │   ├── DeflectArrowTrigger.java ✅ # 阶段2:Not Today 盾牌反弹箭矢
 │   │   │   │   ├── AdventuringTimeTrigger.java ✅ # 阶段2+:记录群系 + 长途旅行
 │   │   │   │   ├── FormObsidianTrigger.java ✅ # V5.23 已落地：water_bucket 浇 still lava → vanilla placeFluid 触发 [story/form_obsidian]
+│   │   │   │   ├── DistractPiglinTrigger.java ✅ # 阶段3:Oh Shiny 用金锭分心猪灵
+│   │   │   │   ├── CureZombieVillagerTrigger.java ✅ # 阶段3:Zombie Doctor 虚弱药水+金苹果治愈僵尸村民
 │   │   │   │   ├── EyeSpyTrigger.java ✅ # 阶段4:扔末影之眼
 │   │   │   │   ├── BlazeRodTrigger.java ✅ # V5.23 已落地：下界扫 BlazeEntity ≤24 格 + 武器检测 + 多假人锁定错峰
+│   │   │   │   ├── SniperDuelTrigger.java ✅ # 阶段4:Sniper Duel 50格开外射杀骷髅
 │   │   │   │   └── EnchantItemTrigger.java ✅ # 阶段5[占位]:附魔台附魔物品
 │   │   │   │
 │   │   │   └── phase/ # 📂 【AI 进化阶段】
 │   │   │       ├── Phase.java 🧩 # V5.20 阶段策略接口(替代之前的 5-case switch)
 │   │   │       ├── PhaseContext.java ✅ # V5.22 已优化：新增 findStone 回调,支持真实 Stone Age
+│   │   │       ├── PhaseWoodAge.java ✅ # V5.30 已重构：木器时代基础行为与工具制造
 │   │   │       ├── PhaseStoneAge.java ✅ # V5.30 已重构：SubPhase 子状态机 WOOD_START/WOOD_CRAFT/STONE_START/STONE_TOOL/STONE_STABLE,基于真实 inv 数据驱动
 │   │   │       ├── PhaseIronAge.java ✅ # V5.28.6 P2-Scan 三分支 EXPLORING fallback / 已修不可达 Y=8 目标
 │   │   │       ├── PhaseDiamondAge.java ✅ # V5.30 已修：砍树 fallback 任务类型与目标对齐(不再 WOODCUTTING+地表点)/ V5.23 背包摘要驱动 + 黑曜石/末影珍珠/钻石装备阈值优先级
@@ -185,6 +200,7 @@ Fabric-Maohi-FakePlayerV3/
 │   │   └── util/ # 📂 【辅助系统】
 │   │       ├── SkinService.java ✅ # V5.23 已优化：失败分类(NOT_FOUND 永久 / TIMEOUT 30s / IO 60s / HTTP_ERROR 5min) + 全局 429 Retry-After
 │   │       ├── BrandRoller.java 🧩 # V5.28+：客户端 brand metadata 多样性轮转(vanilla/fabric/forge),增加假人指纹差异性
+│   │       ├── ClientOptionsRoller.java 🧩 # V5.28+：客户端配置(视距/皮肤组件/主手)的多样化混淆机制
 │   │       └── RandomUtils.java 🧩 # 名字/随机工具；当前稳定基础设施
 │   │
 │   └── mixin/ # 📂 【原版系统挂钩】(通过 Mixin 技术修改游戏核心逻辑)
@@ -192,7 +208,10 @@ Fabric-Maohi-FakePlayerV3/
 │       ├── ServerPlayerEntityMixin.java 🧩 # 实体事件：假人死亡流程/复活挂钩
 │       ├── PlayerManagerMixin.java 🧩 # 社交神经：挂钩全局广播,让假人感知玩家说话
 │       ├── CommandManagerMixin.java 🧩 # 指令注入：注册 /maohi 管理指令
+│       ├── EntityTrackerEntryMixin.java 🧩 # 实体跟踪：假人发包与可见度修饰挂钩
+│       ├── ServerChunkManagerAccessor.java 🧩 # Accessor：区块票券加载底层方法挂钩
 │       ├── ServerCommonNetworkHandlerLatencyAccessor.java 🧩 # Accessor：读取/写入玩家 Ping
+│       ├── SpawnRestrictionMixin.java 🧩 # 限制注入：放宽假人生存模式刷怪及生成干扰限制
 │       └── PlayerInventoryAccessor.java 🧩 # Accessor：绕开保护机制修改假人背包
 ```
 

@@ -48,6 +48,40 @@ public final class PhaseStoneAge implements Phase {
      */
     private static final int EXPLORE_RADIUS = 30;
 
+    // ============================================================
+    // V5.62: 防 bot drift 远离 spawn — random walk + Flocking 同向推力会
+    //   让 bot 累计漂到几千格外(实测 JollyBuild12 17 分钟漂到 3700 格),触发持续
+    //   chunk gen,worldgen worker 满载 CPU。setExplore 加 spawn 引力:距离越远
+    //   baseYaw 越偏向"回家方向";Flocking 改取切向(绕原点)而非径向(直奔)。
+    // ============================================================
+    private static volatile BlockPos cachedWorldSpawn = null;
+    private static volatile long spawnCacheTime = 0L;
+    private static final long SPAWN_CACHE_TTL_MS = 60_000L;
+
+    /** 读取(并缓存)主世界 spawn 位置。反射调用慢,60s TTL;失败回退 (0,64,0) */
+    private static BlockPos getWorldSpawnCached(ServerWorld world) {
+        long now = System.currentTimeMillis();
+        BlockPos cached = cachedWorldSpawn;
+        if (cached != null && now - spawnCacheTime < SPAWN_CACHE_TTL_MS) return cached;
+        try {
+            Object props = world.getLevelProperties();
+            java.lang.reflect.Method m = props.getClass().getMethod("getSpawnPos");
+            Object pos = m.invoke(props);
+            if (pos instanceof BlockPos bp) {
+                cachedWorldSpawn = bp;
+                spawnCacheTime = now;
+                return bp;
+            }
+        } catch (Throwable ignored) {}
+        return cached != null ? cached : new BlockPos(0, 64, 0);
+    }
+
+    /** yaw 加权混合,取短角差避免 -180/+180 边界 wrap。weight∈[0,1] */
+    private static float blendYaw(float a, float b, double weight) {
+        float diff = ((b - a) % 360f + 540f) % 360f - 180f;
+        return a + diff * (float) weight;
+    }
+
     /** WOOD_START → WOOD_CRAFT 的 log 当量阈值。
      *  vanilla 推链需要:1 log → 4 planks(table) + ≥1 log → 4 planks(stick+wood pickaxe),
      *  保险起见取 1 log 当量(plankCount/4 也算"已转化的 log")。只要兜里有木头就去推链, 不要赖在树林里。
@@ -529,6 +563,16 @@ public final class PhaseStoneAge implements Phase {
             flockYaw = com.maohi.fakeplayer.ai.cognition.SharedResourceMap.getInstance().getOrUpdateFlockYaw(player.getYaw());
         }
 
+        // V5.62: spawn 引力 + 切向 Flocking — 防 bot drift 远离 spawn
+        //   homewardWeight: 0~500 格内不施加引力(允许自由探索),500~1500 格线性渐变 0→0.7,>=1500 持续 0.7。
+        //   homeYaw: 朝向 spawn 的 yaw。MC yaw 约定: 0°=+Z 顺时针;方向向量(vx,vz) → yaw=atan2(-vx,vz)。
+        BlockPos spawnPos = getWorldSpawnCached(player.getEntityWorld());
+        double dxToSpawn = spawnPos.getX() - player.getBlockX();
+        double dzToSpawn = spawnPos.getZ() - player.getBlockZ();
+        double distFromSpawn = Math.sqrt(dxToSpawn * dxToSpawn + dzToSpawn * dzToSpawn);
+        float homeYaw = (float) Math.toDegrees(Math.atan2(-dxToSpawn, dzToSpawn));
+        double homewardWeight = Math.max(0.0, Math.min(0.7, (distFromSpawn - 500.0) / 1000.0 * 0.7));
+
         // 生成候选方向
         ThreadLocalRandom rng = ThreadLocalRandom.current();
         final int NUM_CANDIDATES = 12;
@@ -543,8 +587,15 @@ public final class PhaseStoneAge implements Phase {
 
             float baseYaw = player.getYaw();
             if (isLagging && flockYaw != null && rng.nextFloat() < 0.8f) {
-                baseYaw = flockYaw;
+                // V5.62: Flocking 改取切向(homeYaw + 90°,全局逆时针绕 spawn)而非径向 flockYaw。
+                //   原 flockYaw=第一个 lagging bot 的当时朝向 → 所有 bot 同向直奔 → drift 雪崩。
+                //   切向让 bot 绕原点而非远离;近 spawn (≤200 格) homeYaw 不稳定,fallback 用 flockYaw。
+                baseYaw = distFromSpawn > 200.0 ? homeYaw + 90f : flockYaw;
                 angleSpan = Math.min(angleSpan, 120f); // 强行收缩扇形
+            }
+            // V5.62: 距 spawn 越远 baseYaw 越偏向 homeYaw(回家方向),把 bot 拉回来
+            if (homewardWeight > 0.0) {
+                baseYaw = blendYaw(baseYaw, homeYaw, homewardWeight);
             }
 
             float offsetDeg = rng.nextFloat() * angleSpan - angleSpan / 2f;
