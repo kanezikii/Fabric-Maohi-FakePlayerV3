@@ -8,6 +8,7 @@
 		"EntityTrackerEntryMixin",
 		"MinecraftServerMixin",
 		"PlayerManagerMixin",
+		"PlayerSaveHandlerMixin",
 		"ServerChunkManagerAccessor",
 		"ServerPlayerEntityMixin",
 		"ServerCommonNetworkHandlerLatencyAccessor",
