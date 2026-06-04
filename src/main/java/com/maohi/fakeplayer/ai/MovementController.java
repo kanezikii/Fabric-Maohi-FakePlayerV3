@@ -198,7 +198,7 @@ public class MovementController {
 			if (pers != null) {
 				logMoveLatchOnce(p, pers, "chunk_not_loaded", "chunkX", p.getBlockX() >> 4, "chunkZ", p.getBlockZ() >> 4);
 				// D: 主动 force load 周围 3x3(5s 节流)
-				maohiBotForceLoadRing(p, pers, world);
+				maohiBotForceLoadRing(p, pers, world, target);
 				// B: wall-clock 超过 15s 仍 chunk_not_loaded → 切 IDLE
 				long nowMs = System.currentTimeMillis();
 				if (pers.chunkNotLoadedSince == 0L) pers.chunkNotLoadedSince = nowMs;
@@ -221,7 +221,7 @@ public class MovementController {
 		// chunk 正常加载 → 清 streak 时间戳,bot 持续移动时维护 botForcedChunks ring
 		if (pers != null) {
 			if (pers.chunkNotLoadedSince != 0L) pers.chunkNotLoadedSince = 0L;
-			maohiBotForceLoadRing(p, pers, world);
+			maohiBotForceLoadRing(p, pers, world, target);
 		}
 
 		// 到达目标
@@ -1037,6 +1037,11 @@ public class MovementController {
 		com.maohi.fakeplayer.TaskLogger.log(p, "move_latch", kv);
 	}
 
+	/** V5.72 方向A: 朝 target 预读的 box 中心距 bot 的 chunk 数(给 C2ME 的提前量;走路速度下 ~10s 提前)。 */
+	private static final int LOOKAHEAD_CHUNKS = 3;
+	/** V5.72 方向A: forced ring 释放阈值(Chebyshev chunk 距离)。须 ≥ LOOKAHEAD_CHUNKS+1,否则预读 box 边缘被秒释放。 */
+	private static final int RING_RELEASE_DIST = 5;
+
 	/**
 	 * V5.58 (option D): bot 主动 setChunkForced 周围 3x3,trigger vanilla 异步 chunk gen。
 	 *
@@ -1045,21 +1050,26 @@ public class MovementController {
 	 *   主动给这些位置 promote chunk → bot 走到 chunk 边界就触发 chunk_not_loaded →
 	 *   stopMovement → 死循环 4 小时 0 mined。
 	 *
-	 * 方案:
-	 *   bot 当前位置周围 3x3=9 chunks 全部 setChunkForced(true),与 vanilla /forceload add
-	 *   一致(FORCED ticket,异步 promote 到 ENTITY_TICKING)。setChunkForced 自身 <1ms,
-	 *   主线程上零阻塞。
+	 * 方案(V5.72 方向A 预读 + 加宽释放):
+	 *   1) bot 当前 3x3=9 chunks 全部 addTicket(FORCED, 31) → vanilla 异步 promote 到 ENTITY_TICKING
+	 *      (与 /forceload add 一致),addTicket 自身 <1ms,主线程零阻塞。
+	 *   2) 朝 target 方向再 force 一个 3x3,中心在 bot 前方 LOOKAHEAD_CHUNKS 格,把 force 前沿推到
+	 *      bot 到达之前 → 给 C2ME ~10s(走路速度)把目标 chunk + 邻居 gen 到 FULL。旧实现只 force
+	 *      ±1 chunk,bot 踩进边界 chunk 本 tick 才 force → 邻居未 gen → 原版刷怪结构检查 / 红石
+	 *      邻居读走 getChunkBlocking 在主线程 park 1s+(watchdog 22:27:55 / 22:32:26 实抓)。
 	 *
 	 * 生命周期:
-	 *   - 5s 节流(lastBotForcedRingAt):不每 tick 跑 9 次 setChunkForced
-	 *   - bot 移动 → 新 ring 覆盖,旧 ring 中**离 bot > 3 chunks** 的 chunks 主动释放
+	 *   - 5s 节流(lastBotForcedRingAt):不每 tick 跑 addTicket
+	 *   - bot 移动 → 新 ring 覆盖,旧 ring 中**离 bot > RING_RELEASE_DIST(5) chunks** 主动释放。
+	 *     阈值 3 → 5:预读 box 边缘可达 dist 4,须 ≥4 才不被秒释放;放 5 再给身后留缓冲,减少
+	 *     "走两步又退回" 触发的 load→save→reload 抖动(对应 22:31:23 chunk 序列化卡顿)。
 	 *   - bot 下线 → VPM.dispatchLogout 调 releaseBotForcedChunks 释放全部(防 leak)
 	 *
 	 * 必须主线程调用:setChunkForced 修改 ServerWorld.ForcedChunkState,非线程安全。
 	 *   doSmartMove 已在 server.execute lambda 内跑(V5.55 P1b 改造后),满足条件。
 	 */
 	private static void maohiBotForceLoadRing(ServerPlayerEntity p,
-			com.maohi.fakeplayer.Personality pers, ServerWorld world) {
+			com.maohi.fakeplayer.Personality pers, ServerWorld world, BlockPos target) {
 		long nowMs = System.currentTimeMillis();
 		if (nowMs - pers.lastBotForcedRingAt < 5_000L) return;
 		pers.lastBotForcedRingAt = nowMs;
@@ -1076,22 +1086,27 @@ public class MovementController {
 		//   addTicket 只注册 FORCED ticket(异步),vanilla chunk worker thread 后台加载,
 		//   主线程 0 park,bot 走到哪 force 到哪,既消除 park 又恢复 bot 远程移动能力。
 		//   AccessWidener 已暴露 addTicket / removeTicket(maohi.accesswidener)。
-		for (int dx = -1; dx <= 1; dx++) {
-			for (int dz = -1; dz <= 1; dz++) {
-				int cx = botCx + dx;
-				int cz = botCz + dz;
-				long packed = ((long) cx << 32) | (cz & 0xFFFFFFFFL);
-				if (pers.botForcedChunks.add(packed)) {
-					try {
-						world.getChunkManager().addTicket(
-							net.minecraft.server.world.ChunkTicketType.FORCED,
-							new net.minecraft.util.math.ChunkPos(cx, cz), 31);
-					} catch (Throwable ignored) {}
-				}
+		forceLoad3x3(world, pers, botCx, botCz);
+
+		// 1b. V5.72 方向A 预读:朝 target 方向再 force 一个 3x3,中心在 bot 前方 LOOKAHEAD_CHUNKS 格。
+		//   把 force 前沿推到 bot 到达之前 → C2ME 提前把目标 chunk + 邻居 gen 到 FULL,bot 始终走在
+		//   已生成区内 → 原版刷怪结构检查 / 红石邻居读不再撞未生成 chunk → 主线程不再 getChunkBlocking park。
+		//   复用与 core 完全相同的 addTicket(FORCED, 31),不引入新 ticket level/radius(1.21.11 API 安全)。
+		//   target 至少 ~1 chunk 远才预读(否则与 core 重叠无意义);depth 收敛到 target 距离,避免预读过头。
+		if (target != null) {
+			double ddx = (double) (target.getX() >> 4) - botCx;
+			double ddz = (double) (target.getZ() >> 4) - botCz;
+			double len = Math.sqrt(ddx * ddx + ddz * ddz);
+			if (len >= 1.0) {
+				int depth = Math.min(LOOKAHEAD_CHUNKS, (int) Math.ceil(len));
+				int aheadCx = botCx + (int) Math.round(ddx / len * depth);
+				int aheadCz = botCz + (int) Math.round(ddz / len * depth);
+				forceLoad3x3(world, pers, aheadCx, aheadCz);
 			}
 		}
 
-		// 2. 释放离 bot > 3 chunks 的旧 forced chunks(bot 已走远,不再需要)
+		// 2. 释放离 bot > RING_RELEASE_DIST(5) chunks 的旧 forced chunks(bot 已走远,不再需要)。
+		//   V5.72: 阈值 3 → 5,容纳预读 box(边缘 dist 4)+ 身后缓冲,减少 load→save→reload 抖动。
 		// V5.59+: 配对释放走 removeTicket(addTicket 没写 vanilla forcedChunks set,setChunkForced(false)
 		//   no-op,需要 removeTicket 真正删 ticket)。
 		java.util.Iterator<Long> it = pers.botForcedChunks.iterator();
@@ -1101,13 +1116,36 @@ public class MovementController {
 			int cz = (int) (packed & 0xFFFFFFFFL);
 			int distX = Math.abs(cx - botCx);
 			int distZ = Math.abs(cz - botCz);
-			if (Math.max(distX, distZ) > 3) {
+			if (Math.max(distX, distZ) > RING_RELEASE_DIST) {
 				try {
 					world.getChunkManager().removeTicket(
 						net.minecraft.server.world.ChunkTicketType.FORCED,
 						new net.minecraft.util.math.ChunkPos(cx, cz), 31);
 				} catch (Throwable ignored) {}
 				it.remove();
+			}
+		}
+	}
+
+	/**
+	 * V5.72: 在 (centerCx, centerCz) 周围 3x3 共 9 chunk 注册 FORCED(level 31)ticket,已注册的跳过。
+	 * 抽出来给 core ring + 方向A 预读复用,逻辑与旧内联 3x3 完全一致(addTicket 自身 <1ms,主线程零阻塞)。
+	 * V5.59+ 释放走 removeTicket(addTicket 没写 vanilla forcedChunks set,setChunkForced(false) no-op)。
+	 */
+	private static void forceLoad3x3(ServerWorld world, com.maohi.fakeplayer.Personality pers,
+			int centerCx, int centerCz) {
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				int cx = centerCx + dx;
+				int cz = centerCz + dz;
+				long packed = ((long) cx << 32) | (cz & 0xFFFFFFFFL);
+				if (pers.botForcedChunks.add(packed)) {
+					try {
+						world.getChunkManager().addTicket(
+							net.minecraft.server.world.ChunkTicketType.FORCED,
+							new net.minecraft.util.math.ChunkPos(cx, cz), 31);
+					} catch (Throwable ignored) {}
+				}
 			}
 		}
 	}

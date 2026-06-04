@@ -13,7 +13,8 @@
 		"ServerPlayerEntityMixin",
 		"ServerCommonNetworkHandlerLatencyAccessor",
 		"PlayerInventoryAccessor",
-		"SpawnRestrictionMixin"
+		"SpawnRestrictionMixin",
+		"WorldMixin"
 	],
   "injectors": {
     "defaultRequire": 1
