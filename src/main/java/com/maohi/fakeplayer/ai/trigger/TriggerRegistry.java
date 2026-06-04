@@ -64,11 +64,18 @@ public final class TriggerRegistry {
 	// ===== 阶段分桶:每个 GrowthPhase 只 tick 自己桶里的 trigger =====
 	// V5.44: WOOD_AGE 与 STONE_AGE 共享同一份早期 trigger 列表(指向同一 List 实例,无额外内存)
 	// V5.51: TameAnimal 也算早期可触发 — 骨头/鱼从骷髅/钓鱼掉,不需高阶资源
+	// V5.72: BreedAnimals 下放到早期桶 — 真人前几小时常繁殖。其 tryTrigger 自带"饲料 ≥2 才动"
+	//   兜底(无饲料时只做 6 次背包扫描即返回,不扫实体不移动),且移动仅限 8 格内走向动物,
+	//   不会引入 spawn drift。与 Phase 3a(破草拿麦种)组合后,早期假人能用麦种繁殖鸡。
+	//   注意:AdventuringTime 故意不下放 — 它的 tryLongDistanceTrip 会把假人送到 200~500 格外,
+	//   与 V5.62~5.64 的 spawn 牵引(explorationRadius=200,专为早期假人防 chunk gen 卡顿)冲突;
+	//   且 adventuring_time 需 ~40 群系,近 spawn 牵引下早期根本凑不齐,下放收益极低。
 	private static final List<AchievementTrigger> EARLY_GAME_TRIGGERS = List.of(
 		PlantSeedTrigger.INSTANCE,
 		SleepInBedTrigger.INSTANCE,
 		KillMobTrigger.INSTANCE,
-		TameAnimalTrigger.INSTANCE
+		TameAnimalTrigger.INSTANCE,
+		BreedAnimalsTrigger.INSTANCE
 	);
 
 	private static final Map<GrowthPhase, List<AchievementTrigger>> PHASE_BUCKETS = Map.of(

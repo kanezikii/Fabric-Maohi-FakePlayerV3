@@ -73,8 +73,9 @@ public final class CraftingBehavior {
 		//   保证单次远征预算够用。
 		int logCount = 0, plankCount = 0, stickCount = 0, cobbleCount = 0;
 		int stonePickaxeOrBetterCount = 0;
+		int stringCount = 0, woolCount = 0;
 		boolean hasAnyPickaxe = false, hasStonePickaxe = false, hasStoneSword = false, hasStoneAxe = false;
-		boolean hasCraftingTable = false, hasFurnace = false;
+		boolean hasCraftingTable = false, hasFurnace = false, hasHoe = false, hasBed = false;
 		for (int i = 0; i < inv.size(); i++) {
 			ItemStack s = inv.getStack(i);
 			if (s.isEmpty()) continue;
@@ -84,6 +85,8 @@ public final class CraftingBehavior {
 			else if (s.isOf(Items.COBBLESTONE) || s.isOf(Items.COBBLED_DEEPSLATE)) cobbleCount += s.getCount();
 			else if (s.isOf(Items.CRAFTING_TABLE)) hasCraftingTable = true;
 			else if (s.isOf(Items.FURNACE)) hasFurnace = true;
+			else if (s.isOf(Items.STRING)) stringCount += s.getCount();
+			else if (s.isOf(Items.WHITE_WOOL)) woolCount += s.getCount();
 			Item it = s.getItem();
 			if (it == Items.WOODEN_PICKAXE || it == Items.STONE_PICKAXE
 				|| it == Items.IRON_PICKAXE || it == Items.DIAMOND_PICKAXE
@@ -97,6 +100,9 @@ public final class CraftingBehavior {
 				|| it == Items.DIAMOND_SWORD || it == Items.NETHERITE_SWORD) hasStoneSword = true;
 			if (it == Items.STONE_AXE || it == Items.IRON_AXE
 				|| it == Items.DIAMOND_AXE || it == Items.NETHERITE_AXE) hasStoneAxe = true;
+			if (it == Items.WOODEN_HOE || it == Items.STONE_HOE || it == Items.IRON_HOE
+				|| it == Items.DIAMOND_HOE || it == Items.NETHERITE_HOE) hasHoe = true;
+			if (it == Items.WHITE_BED) hasBed = true;
 		}
 
 		// 工作台是否在视野内(找不到时跳过需要工作台的合成)
@@ -161,6 +167,24 @@ public final class CraftingBehavior {
 		else if (hasStonePickaxe && stonePickaxeOrBetterCount < 3 && cobbleCount >= 3 && workbenchNearby) {
 			target = Items.STONE_PICKAXE;
 			ticks = 40;
+		}
+		// 10. V5.72: 工具链补齐后合一把木锄(A Seedy Place / husbandry/plant_seed 前置)。
+		//    最低优先级 — 仅当上面所有生存/工具/熔炉/备镐分支都不命中时才合,绝不抢早期关键资源(plank/stick)。
+		//    一次性:有锄后 hasHoe=true 不再合。PlantSeedTrigger 拿锄头开耕地 + 种麦种解锁成就。
+		else if (!hasHoe && plankCount >= 2 && stickCount >= 2 && workbenchNearby) {
+			target = Items.WOODEN_HOE;
+			ticks = 40;
+		}
+		// 11. V5.72: Sweet Dreams(adventure/sleep_in_bed)前置 — 合白床(3 白羊毛 @1,2,3 + 3 木板 @4,5,6,需工作台)。
+		//    床进背包后 SleepInBedTrigger 放床睡觉解锁成就。最低优先级,不抢关键资源(plank≥3 才动)。
+		else if (!hasBed && woolCount >= 3 && plankCount >= 3 && workbenchNearby) {
+			target = Items.WHITE_BED;
+			ticks = 50;
+		}
+		// 12. 羊毛不够但有 ≥4 线 → 先合白羊毛(背包 2×2,4 线 → 1 羊毛)。蜘蛛掉线,KillMobTrigger 会打蜘蛛。
+		else if (!hasBed && woolCount < 3 && stringCount >= 4) {
+			target = Items.WHITE_WOOL;
+			ticks = 20;
 		}
 
 		if (target == null) return;
@@ -391,7 +415,7 @@ public final class CraftingBehavior {
 		// V5.30 W2S: CRAFTING_TABLE, OAK_PLANKS, STICK 走背包内 2×2 合成
 		// V5.42.4 严重修复: WOODEN_PICKAXE 是 3x3 配方, 必须在工作台合。
 		//   之前把它放进背包合, 导致假人尝试把材料往【盔甲槽】里塞, 逻辑彻底崩坏。
-		if (target == Items.CRAFTING_TABLE || target == Items.OAK_PLANKS || target == Items.STICK || target == Items.BLAZE_POWDER || target == Items.ENDER_EYE) {
+		if (target == Items.CRAFTING_TABLE || target == Items.OAK_PLANKS || target == Items.STICK || target == Items.BLAZE_POWDER || target == Items.ENDER_EYE || target == Items.WHITE_WOOL) {
 			executeInInventoryCraft(player, target, recipe);
 			return;
 		}
@@ -647,6 +671,20 @@ public final class CraftingBehavior {
 			new Placement(Items.OAK_PLANKS, 1), new Placement(Items.OAK_PLANKS, 2),
 			new Placement(Items.OAK_PLANKS, 3),
 			new Placement(Items.STICK, 5), new Placement(Items.STICK, 8));
+		// V5.72: 木锄 — A Seedy Place(husbandry/plant_seed)前置。形状同 vanilla:材料 @1,2 + 木棍 @5,8。
+		//   PlantSeedTrigger 用锄头把草方块开成耕地再种麦种。
+		if (target == Items.WOODEN_HOE) return List.of(
+			new Placement(Items.OAK_PLANKS, 1), new Placement(Items.OAK_PLANKS, 2),
+			new Placement(Items.STICK, 5), new Placement(Items.STICK, 8));
+		// V5.72: Sweet Dreams(adventure/sleep_in_bed)前置链。
+		//   白羊毛(4 线 2×2,蜘蛛掉线)→ 白床(3 羊毛 @1,2,3 + 3 木板 @4,5,6,3×3 工作台)。
+		//   床进背包后 SleepInBedTrigger 现有"放床+睡觉"链即触发成就。
+		if (target == Items.WHITE_WOOL) return List.of(
+			new Placement(Items.STRING, 1), new Placement(Items.STRING, 2),
+			new Placement(Items.STRING, 3), new Placement(Items.STRING, 4));
+		if (target == Items.WHITE_BED) return List.of(
+			new Placement(Items.WHITE_WOOL, 1), new Placement(Items.WHITE_WOOL, 2), new Placement(Items.WHITE_WOOL, 3),
+			new Placement(Items.OAK_PLANKS, 4), new Placement(Items.OAK_PLANKS, 5), new Placement(Items.OAK_PLANKS, 6));
 
 		if (target == Items.STONE_PICKAXE) return List.of(
 			new Placement(Items.COBBLESTONE, 1), new Placement(Items.COBBLESTONE, 2), new Placement(Items.COBBLESTONE, 3),
