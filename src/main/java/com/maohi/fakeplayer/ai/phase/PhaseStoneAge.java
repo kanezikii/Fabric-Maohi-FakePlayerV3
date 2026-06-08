@@ -91,8 +91,7 @@ public final class PhaseStoneAge implements Phase {
     /** STONE_START → STONE_TOOL 的 cobble 阈值(vanilla 石镐 = 3 cobble + 2 stick) */
     private static final int COBBLE_FOR_STONE_PICK = 3;
 
-    /** STONE_TOOL 内,cobble 攒到该值之后才允许 IDLE 等 craft;否则继续挖以备多产物(石剑/石斧/熔炉) */
-    private static final int COBBLE_STABLE_THRESHOLD = 8;
+    // V5.92: COBBLE_STABLE_THRESHOLD 随 V5.91 STONE_TOOL 批量优化删除而废弃，已移除。
 
     /** V5.42 死锁 #1: bot 远离工作台时,在该半径内回找自己放过的 CRAFTING_TABLE
      *  V5.44: pkg-private 让 PhaseWoodAge 复用 */
@@ -244,27 +243,39 @@ public final class PhaseStoneAge implements Phase {
                     // 不够合石镐 → 继续挖
                     assignMineStone(player, personality, ctx);
                 } else {
+                    // V5.91: 工作台定位 — 先 32 格扫描，扫不到回退到记忆台坐标（≤64 格，镜像 STONE_STABLE 装备驱动）。
+                    //   破窄口卡死：原实现只做 32 格扫描，假人被 stuck-teleport 甩离 / dig-down 钻进竖井后
+                    //   离自己 WOOD_AGE 建的台 >32 格 → 永远找不到台合石镐 → 无限挖圆石（囤几十个）升不了级。
                     BlockPos workbench = com.maohi.fakeplayer.ai.CraftingBehavior
                         .findCraftingTable(player, WORKBENCH_RETURN_RADIUS);
+                    if (workbench == null && personality.knownWorkbenchPos != null
+                            && player.getBlockPos().getSquaredDistance(personality.knownWorkbenchPos) <= 64.0 * 64.0) {
+                        workbench = personality.knownWorkbenchPos;
+                    }
                     boolean nearWorkbench = workbench != null
                         && player.getBlockPos().getSquaredDistance(workbench) <= WORKBENCH_NEARBY_SQ;
                     if (nearWorkbench) {
                         // 工作台 6 格内 → IDLE 等 autoCraftStoneTools 自然推 STONE_PICKAXE
                         setIdle(personality, player, 100);
-                    } else if (d.cobbleCount < COBBLE_STABLE_THRESHOLD) {
-                        // 远离工作台但 cobble<8 → 继续挖,攒齐再一次性回去合石镐+石剑+石斧+熔炉,
-                        //   减少来回奔波(避免 cobble=3 就跑回 → 合完 → 又跑出去挖 的颠簸)。
-                        assignMineStone(player, personality, ctx);
                     } else if (workbench != null) {
-                        // cobble≥8 + 工作台 6~32 格外:复用 EXPLORING 任务走过去。
-                        //   到达后 (dist≤4) reassign 路径会 clear taskTarget,下个周期重新评估,
-                        //   此时 nearWorkbench=true → setIdle → craft 触发。
-                        set(personality, player, TaskType.EXPLORING, workbench);
+                        // 有台(扫描或记忆)但不在 6 格 → RETURN_TO_BASE 走过去，到达即驻留合镐。
+                        //   原"cobble<8 先继续挖"的批量优化删除：石镐是进度硬闸门，优先合出来比攒满 8 圆石更重要；
+                        //   合出石镐即转 STONE_STABLE，批量需求由那边满足，不会来回颠簸。
+                        set(personality, player, TaskType.RETURN_TO_BASE, workbench);
+                        com.maohi.fakeplayer.TaskLogger.log(player, "stone_tool_return_bench",
+                            "bench", workbench, "cobble", d.cobbleCount);
                     } else {
-                        // cobble≥8 但 32 格内没自己放过的工作台 → 继续挖。
-                        //   bot 后续 plank≥4 时 autoCraftStoneTools 会触发新工作台合成 (!hasTable + !workbench),
-                        //   自然摆脱死锁(代价是多 4 plank,可接受)。
-                        assignMineStone(player, personality, ctx);
+                        // V5.91: 完全没有可达的台。能自建就驻留让 autoCraftStoneTools 步1/2 建台+放置（竖井底也能就地建）；
+                        //   连建台木料都没有(plank<4 且 log<1 且无台item) → 砍树补料，绝不无限空挖。
+                        if (d.hasTable || d.plankCount >= 4 || d.logCount >= 1) {
+                            setIdle(personality, player, 100);
+                            com.maohi.fakeplayer.TaskLogger.log(player, "stone_tool_build_bench",
+                                "hasTable", d.hasTable, "planks", d.plankCount, "logs", d.logCount);
+                        } else {
+                            com.maohi.fakeplayer.TaskLogger.log(player, "stone_tool_need_wood",
+                                "cobble", d.cobbleCount, "planks", d.plankCount, "logs", d.logCount);
+                            assignChopTree(player, personality, ctx);
+                        }
                     }
                 }
             }
@@ -464,28 +475,14 @@ public final class PhaseStoneAge implements Phase {
                 setExplore(p, player);
                 return;
             }
-            // V5.88: 石头在脚下方 ≥2 格(覆土遮挡、超 vanilla 4.5 格 reach 够不到)→ 往下挖一格逼近,
-            //   而不是放弃乱逛。这是地表假人"挖矿一小时 0 圆石"的根因:旧逻辑判深石头不可达就 setExplore,
-            //   handleMiningTask 又只破坏 4.5 格内目标、不挖穿覆土 → 永远到不了石头层。修法:挖脚下方块、
-            //   假人掉下去逐步贴近,直到脚踩石头(depthBelow==1)再直接挖出圆石;困井底时 stuck 三级 teleport 兜底。
             int depthBelow = player.getBlockY() - target.getY();
-            if (depthBelow >= 2) {
-                BlockPos digDown = player.getBlockPos().down();           // 待挖的脚下方块
-                ServerWorld sw = (ServerWorld) player.getEntityWorld();
-                net.minecraft.block.BlockState footState =
-                    com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(sw, digDown);
-                net.minecraft.block.BlockState landState =
-                    com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(sw, digDown.down());
-                // 安全:脚下是空气(悬空)/ 挖后落点是空洞(摔)或岩浆水(烧死淹死)→ 别下挖,另寻落点。
-                //   和平难度也照样摔死/烧死并掉落物,务必拦住。
-                if (footState == null || footState.isAir()
-                        || landState == null || landState.isAir() || !landState.getFluidState().isEmpty()) {
-                    setExplore(p, player);
-                    return;
-                }
-                set(p, player, TaskType.MINING, digDown);
-                com.maohi.fakeplayer.TaskLogger.log(player, "stone_dig_down",
-                    "stoneY", target.getY(), "depthBelow", depthBelow, "digAt", digDown.getY());
+            // V5.92: 石头在脚下(depthBelow≥1)→ 可回爬的「楼梯式下挖」一步，取代 V5.88 直挖竖井。
+            //   旧 V5.88 直挖脚下方块 → 假人掉进 1 宽竖井，采完圆石爬不出来，只能靠 stuck-teleport 捞(~10min 循环)。
+            //   楼梯式:朝当前朝向前进 1 + 下降 1，每步留 1 高台阶(PathfindingNavigation 的 up(2) 上爬邻居可回爬)，
+            //   采完圆石假人自己沿台阶走回地表工作台;穿石层时台阶块本身=石头 → 边下边采圆石。
+            //   depthBelow≤0(石头与脚同高/更高，如暴露崖面)→ 落到下面直接横向挖，不挖楼梯。
+            if (depthBelow >= 1) {
+                assignStaircaseStep(player, p, target, depthBelow);
                 return;
             }
             // P0: 找到石头 → 标记当前 region 为 MEDIUM（石头到处都有，不算 RICH）
@@ -506,6 +503,74 @@ public final class PhaseStoneAge implements Phase {
             p.regionMemory.mark(rx, rz, com.maohi.fakeplayer.ai.cognition.RegionScore.EMPTY, false);
             setExplore(p, player);
         }
+    }
+
+    /**
+     * V5.92: 可回爬的「楼梯式下挖」一步，取代 V5.88 直挖竖井(假人困井底爬不出、只能靠 teleport 捞)。
+     *
+     * <p>朝假人当前水平朝向「前进 1 + 下降 1」:清前方 3 格(脚高 fMid / 头高 fHead / 前下 fDown)，
+     * 要求落脚地面 fFloor 实心非流体。每周期清一块(由 handleMiningTask 在 4.5 格 reach 内破坏)，
+     * 三格皆空后 setMoveTo 走下台阶。留下的台阶每级只高 1 格 —— PathfindingNavigation 的 up(2)
+     * 上爬邻居能让假人采完圆石沿原路走回地表工作台(每级台阶的落脚地面就是上一级校验过的 fFloor，
+     * 始终实心，回爬链不断)。穿过石层时 fMid/fDown 本身就是石头 → 破坏即掉圆石，边下边采。
+     *
+     * <p>安全:任一格 chunk 未就绪(safeGetBlockState 返 null)、落脚地面空气(悬空摔)/流体，
+     * 或前方三格含流体(岩浆/水)→ setExplore 另寻，绝不挖进空洞或岩浆(和平难度也照样摔死/烧死并掉落物)。
+     */
+    private static void assignStaircaseStep(ServerPlayerEntity player, Personality p, BlockPos stoneTarget, int depthBelow) {
+        ServerWorld sw = (ServerWorld) player.getEntityWorld();
+        net.minecraft.util.math.Direction face = player.getHorizontalFacing();
+        BlockPos pos = player.getBlockPos();
+        BlockPos fMid = pos.offset(face);          // 前方脚高:前进时脚部空间 / 下台阶后头部空间
+        BlockPos fHead = fMid.up();                // 前方头高:前进时头部空间
+        BlockPos fDown = fMid.down();              // 前方下一格:下台阶后脚部空间
+        BlockPos fFloor = fDown.down();            // 下台阶后落脚地面
+
+        net.minecraft.block.BlockState midState =
+            com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(sw, fMid);
+        net.minecraft.block.BlockState headState =
+            com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(sw, fHead);
+        net.minecraft.block.BlockState downState =
+            com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(sw, fDown);
+        net.minecraft.block.BlockState floorState =
+            com.maohi.fakeplayer.ai.PathfindingNavigation.safeGetBlockState(sw, fFloor);
+
+        // 任一格 chunk 未就绪(null)→ 不挖;落脚地面非实心/流体、或前方三格含流体 → setExplore 另寻
+        if (midState == null || headState == null || downState == null || floorState == null
+                || floorState.isAir() || !floorState.getFluidState().isEmpty()
+                || !midState.getFluidState().isEmpty()
+                || !headState.getFluidState().isEmpty()
+                || !downState.getFluidState().isEmpty()) {
+            setExplore(p, player);
+            return;
+        }
+
+        // 逐格开台阶(每周期一块):脚高 → 头高 → 前下
+        if (!midState.isAir()) {
+            set(p, player, TaskType.MINING, fMid);
+            com.maohi.fakeplayer.TaskLogger.log(player, "stone_stair_dig",
+                "step", "mid", "at", fMid.getY(), "stoneY", stoneTarget.getY(), "depthBelow", depthBelow);
+            return;
+        }
+        if (!headState.isAir()) {
+            set(p, player, TaskType.MINING, fHead);
+            com.maohi.fakeplayer.TaskLogger.log(player, "stone_stair_dig",
+                "step", "head", "at", fHead.getY(), "stoneY", stoneTarget.getY(), "depthBelow", depthBelow);
+            return;
+        }
+        if (!downState.isAir()) {
+            set(p, player, TaskType.MINING, fDown);
+            com.maohi.fakeplayer.TaskLogger.log(player, "stone_stair_dig",
+                "step", "down", "at", fDown.getY(), "stoneY", stoneTarget.getY(), "depthBelow", depthBelow);
+            return;
+        }
+        // 三格皆空、落脚实心 → 下台阶 1 格。requestTeleport 可靠下降(镜像 StripMineBehavior.tickDescend,
+        //   不依赖近距 setMoveTo 的到达判定，避免"台阶清完却没走下去"原地空转);落到前进列 fMid 的水平位置、
+        //   fDown 的高度，正好站上已校验实心的 fFloor。留下的 1 高台阶由 PathfindingNavigation up(2) 邻居供回爬。
+        player.requestTeleport(fMid.getX() + 0.5, fDown.getY(), fMid.getZ() + 0.5);
+        setIdle(p, player, 20);   // 下降后短驻留，下个 assign 周期从新(更低)位置重新评估:继续下挖 or 采到圆石转 STONE_TOOL
+        com.maohi.fakeplayer.TaskLogger.log(player, "stone_stair_step",
+            "to", fDown, "depthBelow", depthBelow);
     }
 
     /**
