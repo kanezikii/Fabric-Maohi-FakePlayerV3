@@ -1641,6 +1641,16 @@ prepareAndSpawnVirtualPlayer();
             long noProgressMs = now - lastProgress;
             if (noProgressMs < NO_PROGRESS_DURATION_MS) continue;
 
+            // V5.93: min 在线保底 —— 即便这只长期卡死，也不把有效在线压到 ≤ minVirtualPlayers。
+            //   背景:本方法原无 min 守门，全员卡石器(都 30min+ 0 进度)时会每 ~10min 逐一回收到 0 在线，
+            //   叠加下线后 nextJoinTime 最长 ~58min 的补位冷却 → 出现"全部下线"窗口。这是 min 唯一被绕过的下线路径。
+            //   有效在线口径与 manageLoop 的 over-target kick 一致(减 inFlight + scheduled)。
+            //   注:配合 V5.91/V5.92 解决卡石器后，正常假人持续刷 lastProgressAt 不进本路径，本守门只兜底病态全卡场景。
+            if (virtualPlayerUUIDs.size() - inFlightLogouts.size() - logoutScheduledTime.size()
+                    <= config().minVirtualPlayers) {
+                return; // 已达保底线，本轮不回收;卡死假人靠 dig-down/楼梯自行脱困或等会话到期(到期路径同样守 min)
+            }
+
             // 命中: bot 已 5min+ 在线且 30min+ 无任何实质进展
             String name = virtualPlayerNames.getOrDefault(uuid, uuid.toString());
             int ach = (pers.unlockedAdvancements == null) ? 0 : pers.unlockedAdvancements.size();
