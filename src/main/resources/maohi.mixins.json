@@ -15,6 +15,7 @@
 		"ServerCommonNetworkHandlerLatencyAccessor",
 		"PlayerInventoryAccessor",
 		"SpawnRestrictionMixin",
+		"VillagerTaskListProviderMixin",
 		"WorldMixin"
 	],
   "injectors": {
