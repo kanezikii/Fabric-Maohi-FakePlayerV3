@@ -362,22 +362,22 @@ public class MaohiCommands {
     }
 
     /**
-     * V5.99: /maohi fakeplayer 子命令实现 ——「假人不下线」开关。
+     * V5.100: /maohi fakeplayer 子命令实现 ——「假人轮替」开关。
      * target=null → toggle;target=true/false → 强制设定。
-     * on  → 停所有自动轮替下线(会话到期 / 超目标 / idle 兜底),在线假人不主动离线;
-     *       手动 /maohi kick 与关服不受影响,补位 spawn 仍照常(在线数会爬到目标上限并保持)。
-     * off → 默认,假人正常轮替上下线。只写内存,重启回归配置默认。
+     * on(默认)→ 假人正常轮替上下线(会话到期下线 + idle 无进度兜底回收),拟真人来人往。
+     * off → 不轮替:在线假人不主动离线(roster 稳定),但「超目标数」仍踢人(目标数=在线上限,防过多卡服),
+     *       手动 /maohi kick 与关服不受影响。只写内存,重启回归配置默认。
      */
     private static int toggleFakeplayer(CommandContext<ServerCommandSource> ctx, Boolean target) {
         MaohiConfig cfg = MaohiConfig.getInstance();
-        boolean newValue = target != null ? target : !cfg.fakeplayerKeepOnline;
-        cfg.fakeplayerKeepOnline = newValue;
+        boolean newValue = target != null ? target : !cfg.fakeplayerRotation;
+        cfg.fakeplayerRotation = newValue;
         if (newValue) {
             feedback(ctx.getSource(),
-                "§a[FS Core] fakeplayer = §eON §7(假人不下线:已停所有自动轮替离线;手动 kick 与关服不受影响;重启不保留)");
+                "§a[FS Core] fakeplayer = §eON §7(默认:假人轮替上下线 — 会话到期 + idle 回收照常;重启不保留)");
         } else {
             feedback(ctx.getSource(),
-                "§c[FS Core] fakeplayer = §7OFF §7(默认:假人按会话 / 时段目标正常轮替上下线;重启不保留)");
+                "§c[FS Core] fakeplayer = §7OFF §7(不轮替:在线假人不主动离线,但仍按目标数上限管控防卡服;重启不保留)");
         }
         return Command.SINGLE_SUCCESS;
     }

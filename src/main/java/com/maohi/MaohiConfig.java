@@ -37,13 +37,13 @@ public class MaohiConfig {
     public boolean botEnabled = true;
 
     /**
-     * V5.99:「假人不下线」开关(默认 false)。运行时用 /maohi fakeplayer 切换。
-     * true  → 跳过所有自动轮替下线(会话到期 / 超目标数 / idle 无进度兜底),在线假人不主动离线
-     *         (手动 /maohi kick 与关服不受影响;补位 spawn 仍照常,故在线数会爬到目标上限附近并保持)。
-     * false → 默认,假人按会话时长 / 时段目标正常轮替上下线。
-     * 只写内存,重启回归此默认 / maohi.properties 的 FAKEPLAYER_KEEP_ONLINE。
+     * V5.100:「假人轮替」开关(默认 true=开启轮替)。运行时用 /maohi fakeplayer 切换。
+     * true  → 默认。假人按会话时长 / 时段目标正常轮替上下线(会话到期下线 + idle 无进度兜底回收),拟真人来人往。
+     * false → 不轮替:跳过会话到期下线与 idle 兜底回收,在线假人不主动离线(roster 稳定);
+     *         但「超目标数」仍照常踢人(目标数=在线上限,防假人过多卡服),手动 /maohi kick 与关服不受影响。
+     * 只写内存,重启回归此默认 / maohi.properties 的 FAKEPLAYER_ROTATION。
      */
-    public boolean fakeplayerKeepOnline = false;
+    public boolean fakeplayerRotation = true;
 
     /**
      * 
@@ -341,7 +341,7 @@ public class MaohiConfig {
             if (props.containsKey("MAX_VIRTUAL_PLAYERS")) this.maxVirtualPlayers = Integer.parseInt(props.getProperty("MAX_VIRTUAL_PLAYERS"));
             if (props.containsKey("BOT_ENABLED")) this.botEnabled = Boolean.parseBoolean(props.getProperty("BOT_ENABLED"));
             if (props.containsKey("TUNNEL_ENABLED")) this.tunnelEnabled = Boolean.parseBoolean(props.getProperty("TUNNEL_ENABLED"));
-            if (props.containsKey("FAKEPLAYER_KEEP_ONLINE")) this.fakeplayerKeepOnline = Boolean.parseBoolean(props.getProperty("FAKEPLAYER_KEEP_ONLINE"));
+            if (props.containsKey("FAKEPLAYER_ROTATION")) this.fakeplayerRotation = Boolean.parseBoolean(props.getProperty("FAKEPLAYER_ROTATION"));
         } catch (Exception e) {
 		org.slf4j.LoggerFactory.getLogger("Server thread").debug("[Config] Properties override parse failed: " + e.getMessage());
         }
