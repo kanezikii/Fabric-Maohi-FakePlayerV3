@@ -561,10 +561,14 @@ public class MaohiCommands {
             posPart = "§8?";
         }
 
-        // ---- 在线时长：全中文 ----
+        // ---- 在线时长：累计在线时长(全中文) ----
+        // V5.101: 改用 SavedPlayer.totalPlaytime(在线每 tick +50ms,跨会话持久化累加),
+        //   而非旧的 now - firstJoinAt(那是"角色诞生至今墙钟差",含离线/关服时间 → 偏大失真)。
+        //   语义同 vanilla "已游玩时间":只计真实在线 tick,与真人画像一致。
         String uptime;
-        if (pers != null && pers.firstJoinAt > 0L) {
-            long sec = Math.max(0, (System.currentTimeMillis() - pers.firstJoinAt) / 1000L);
+        long playMs = manager.getTotalPlaytimeMs(uuid);
+        if (playMs > 0L) {
+            long sec = playMs / 1000L;
             long h = sec / 3600;
             long m = (sec % 3600) / 60;
             long s = sec % 60;

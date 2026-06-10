@@ -1080,6 +1080,12 @@ prepareAndSpawnVirtualPlayer();
     // --- Getters & Helpers for SocialEngine & Spawner ---
     public List<UUID> getOnlinePlayerUuids() { return virtualPlayerUUIDs; }
     public Personality getPersonality(UUID uuid) { return playerPersonalities.get(uuid); }
+    /** V5.101: 累计在线时长(ms)。读 SavedPlayer.totalPlaytime —— 在线时每 tick +50ms(updatePlayerMetadata),
+     *  跨会话持久化累加,不含离线/关服时间。供 /maohi list 显示真实"累计在线时长",取代旧的 now-firstJoinAt(诞生墙钟差)。 */
+    public long getTotalPlaytimeMs(UUID uuid) {
+        SavedPlayer sp = knownPlayers.get(uuid);
+        return sp != null ? sp.totalPlaytime : 0L;
+    }
     // V5.59: 额外检查 inFlightLogouts,避免 fall-damage / idle-kick 等旁路在 bot 已派遣下线
     //   但 virtualPlayerUUIDs 尚未清理的窗口里再次调 startLogoutProcessInternal(虽然 Set.add
     //   幂等无害,但会在 pendingLogoutQueue 里塞重复 uuid,占用队列槽位)。
