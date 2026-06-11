@@ -100,6 +100,10 @@ public final class PhaseStoneAge implements Phase {
      *  V5.44: pkg-private 让 PhaseWoodAge 复用 */
     static final double WORKBENCH_NEARBY_SQ = 36.0;
 
+    /** V5.103 冶炼设施(炉/营地台)长途上限(格²)。超过此距离不长途回走/不去共享炉
+     *  (深井+地表跨距寻路不可靠),改就地自建。96 格 ≈ 还值得走一趟的半径。 */
+    static final double SMELT_TRAVEL_MAX_SQ = 96.0 * 96.0;
+
     /**
      * V5.30 STONE_AGE 内部细分子状态。
      * V5.44: 拆出 PhaseWoodAge 后,WOOD_START/WOOD_CRAFT 迁出本枚举(由 PhaseWoodAge.SubPhase 独立定义)。
@@ -340,6 +344,10 @@ public final class PhaseStoneAge implements Phase {
                         if (found != null) {
                             personality.knownFurnacePos = found;
                             saFurnace = found;
+                            // V5.103: 扫到的炉也上报共享,让其它挖到 raw_iron 的假人能导航过来共用。
+                            com.maohi.fakeplayer.ai.cognition.SharedResourceMap.getInstance().report(
+                                com.maohi.fakeplayer.ai.cognition.SharedResourceMap.LandmarkType.FURNACE,
+                                found, player.getUuid());
                         }
                     }
 
@@ -359,28 +367,63 @@ public final class PhaseStoneAge implements Phase {
                             return;
                         }
                     } else {
-                        // 无熔炉记录 → 尝试就地合熔炉
+                        // 无熔炉记录 → 优先级:就地能建就建 > 共享炉(escape hatch) > 回营 > 就地自建台。
+                        //   绝不再像旧 SA-P6 那样空挖等"碰巧",缺设施一律就地造或就近共用。
                         BlockPos saWorkbench = PhaseIronAge.findCraftingTable(
                             saWorld, player.getBlockPos(), 6);
+                        // SA-P4: 已贴台(≤6) + cobble≥8 → 就地合熔炉(最快,已在台边)
                         if (saWorkbench != null && d.cobbleCount >= 8) {
-                            // SA-P4: 附近有工作台 + cobble≥8 → IDLE 让 autoCraftStoneTools 合熔炉
                             setIdle(personality, player, 100);
                             com.maohi.fakeplayer.TaskLogger.log(player, "stone_smelt_craft_furnace",
                                 "cobble", d.cobbleCount, "workbench", saWorkbench);
                             return;
                         }
-                        // SA-P5: 有营地工作台记录 → 回营地建炉
+                        // SA-P4b 资源共享(escape hatch): 一时建不出炉时,导航到舰队已有的炉「排队共用」(不 claim)。
+                        //   错峰查询防同 tick 扎堆;远于 SMELT_TRAVEL_MAX_SQ 不去(长途寻路不可靠,落到下面自建)。
+                        //   到附近后 SA-P3 的 findFurnace(24) 会锁定确切炉 → SA-P1 贴炉烧。促进舰队冶炼达成。
+                        if (com.maohi.fakeplayer.ai.cognition.SharedResourceMap.shouldQueryThisTick(
+                                player.getEntityWorld().getServer().getTicks(),
+                                personality.triggerPhaseSeed, personality.taskFailCount)) {
+                            com.maohi.fakeplayer.ai.cognition.SharedResourceMap.LandmarkNode fn =
+                                com.maohi.fakeplayer.ai.cognition.SharedResourceMap.getInstance()
+                                    .queryNearest(player.getBlockPos(), player.getUuid(),
+                                        com.maohi.fakeplayer.ai.cognition.SharedResourceMap.LandmarkType.FURNACE);
+                            if (fn != null
+                                    && player.getBlockPos().getSquaredDistance(fn.approxPos) <= SMELT_TRAVEL_MAX_SQ) {
+                                set(personality, player, TaskType.RETURN_TO_BASE, fn.approxPos);
+                                com.maohi.fakeplayer.TaskLogger.log(player, "stone_smelt_shared_furnace",
+                                    "approx", fn.approxPos);
+                                return;
+                            }
+                        }
+                        // SA-P5: 有营地工作台记录 且 ≤ 长途上限 → 回营建炉(超距不长途回走,落到就地自建)
                         BlockPos saBase = personality.knownWorkbenchPos;
-                        if (saBase != null) {
+                        if (saBase != null
+                                && player.getBlockPos().getSquaredDistance(saBase) <= SMELT_TRAVEL_MAX_SQ) {
                             set(personality, player, TaskType.RETURN_TO_BASE, saBase);
                             com.maohi.fakeplayer.TaskLogger.log(player, "stone_smelt_return_base",
                                 "reason", "need_furnace", "base", saBase);
                             return;
                         }
-                        // SA-P6: 什么都没有 → fall-through 到正常挖矿/砍树
-                        //   autoSmeltOres(V5.86 已解锁 STONE_AGE) 可能在移动中偶然触发。
-                        com.maohi.fakeplayer.TaskLogger.log(player, "stone_smelt_no_furnace",
-                            "rawIron", d.rawIronCount, "cobble", d.cobbleCount);
+                        // SA-P6(V5.103 重写): 缺设施就地自建,镜像 STONE_TOOL —— 绝不空挖靠碰巧。
+                        if (d.cobbleCount < 8) {
+                            // 圆石不够 8 → fall-through 走下方 STONE_STABLE 正常挖石(挖石本就产圆石)
+                            com.maohi.fakeplayer.TaskLogger.log(player, "stone_smelt_need_cobble",
+                                "cobble", d.cobbleCount);
+                        } else if (d.hasTable || d.plankCount >= 4 || d.logCount >= 1) {
+                            // 有圆石、无可用台 → 就地建台(autoCraftStoneTools 步2),下周期贴台→步8 建炉
+                            setIdle(personality, player, 100);
+                            com.maohi.fakeplayer.TaskLogger.log(player, "stone_smelt_build_bench",
+                                "hasTable", d.hasTable, "planks", d.plankCount, "logs", d.logCount,
+                                "cobble", d.cobbleCount);
+                            return;
+                        } else {
+                            // 有圆石、无台、无建台木料 → 砍树补木
+                            com.maohi.fakeplayer.TaskLogger.log(player, "stone_smelt_need_wood",
+                                "cobble", d.cobbleCount, "planks", d.plankCount, "logs", d.logCount);
+                            assignChopTree(player, personality, ctx);
+                            return;
+                        }
                     }
                 }
                 // ── END SA-P1~P6 ──

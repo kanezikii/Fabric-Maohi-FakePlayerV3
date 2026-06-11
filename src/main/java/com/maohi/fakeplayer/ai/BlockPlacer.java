@@ -675,10 +675,15 @@ public class BlockPlacer {
 				PacketHelper.setSelectedSlot(player, original);
 			}
 			// NOTE: V5.80 熔炉落地成功 → 记录坐标，供 PhaseIronAge / RETURN_TO_BASE 直接复用
+			// V5.103: 同步上报 SharedResourceMap（FURNACE 跨假人共享，促进舰队冶炼达成 — 别人挖到 raw_iron
+			//   能导航到这台炉「排队共用」而不必各自建炉）。镜像 table 钩子,report 自带 chunk-60s 限频。
 			BlockPos placed = personality.furnacePlaceBlockPos;
 			if (placed != null
 					&& player.getEntityWorld().getBlockState(placed).isOf(net.minecraft.block.Blocks.FURNACE)) {
 				personality.knownFurnacePos = placed;
+				com.maohi.fakeplayer.ai.cognition.SharedResourceMap.getInstance().report(
+					com.maohi.fakeplayer.ai.cognition.SharedResourceMap.LandmarkType.FURNACE,
+					placed, player.getUuid());
 				com.maohi.fakeplayer.TaskLogger.log(player, "furnace_placed_recorded", "pos", placed);
 			}
 			resetFurnacePlaceState(personality);

@@ -50,8 +50,10 @@ public final class SharedResourceMap {
         LOOT_CHEST,     // 宝箱（地牢/庙宇/沉船等）
         LOG_CLUSTER,    // V5.62: 木材丰富区(树林),由 mine_done 砍到 log 时上报
         STONE_AREA,     // V5.62: 石头丰富区,由 mine_done 挖到 stone/cobblestone 时上报
-        CRAFTING_TABLE  // V5.84.1: 已放置的工作台坐标。永久方块不消失,假人间共享导航过去"排队共用"——
+        CRAFTING_TABLE, // V5.84.1: 已放置的工作台坐标。永久方块不消失,假人间共享导航过去"排队共用"——
                         //   查询侧故意不 claim(非独占),与其它"认领型"地标不同。DIAMOND_AGE 合钻镐/钻甲用。
+        FURNACE         // V5.103: 已放置的熔炉坐标。STONE→IRON 冶炼唯一桥梁,假人间共享导航过去"排队共用"
+                        //   (同 CRAFTING_TABLE:查询侧故意不 claim)。落炉(BlockPlacer)/扫到炉(SA-P3)时上报。
     }
 
     /** 一条共享情报节点 */
