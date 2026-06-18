@@ -315,12 +315,17 @@ public final class SmeltingBehavior {
 			|| stack.isOf(Items.COAL) || stack.isOf(Items.CHARCOAL);
 	}
 
-	/** 找第一个可烧炼燃料槽位(煤/木炭/任意原木/任意木板) */
+	/** V5.118: 找燃料槽,优先煤/木炭,木料兜底 —— 煤在矿区充足且对合成无用,把原木/木板留给
+	 *  木棍/工作台/修工具。旧版返回首个燃料常把刚砍的木板烧掉 → 熔多锭掏空木料 → 缺木棍合不出铁镐。 */
 	private static int findFuelSlot(PlayerInventory inv) {
+		int woodSlot = -1;
 		for (int i = 0; i < inv.size(); i++) {
-			if (isFuel(inv.getStack(i))) return i;
+			ItemStack s = inv.getStack(i);
+			if (s.isEmpty()) continue;
+			if (s.isOf(Items.COAL) || s.isOf(Items.CHARCOAL)) return i; // 煤/木炭优先,保住木料
+			if (woodSlot < 0 && (s.isIn(ItemTags.LOGS) || s.isIn(ItemTags.PLANKS))) woodSlot = i;
 		}
-		return -1;
+		return woodSlot; // 无煤才退回木料(原木/木板)
 	}
 
 	/**

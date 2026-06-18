@@ -66,6 +66,23 @@ public class VirtualPlayerManager {
     private final com.maohi.fakeplayer.tick.BlockScanCache blockScanCache = new com.maohi.fakeplayer.tick.BlockScanCache();
 
     /**
+     * V5.117: 由 LagWatchdog 在抓到主线程 stall 时调用,主动 engage throttle。
+     *   防 mspt 检测的"反应滞后":stall 期间主线程已经卡住 1+s,而 mspt 是 server tick 平均
+     *     (50ms tick 间隔),mspt>100 触发的 shouldThrottle 在 stall 结束后下一个 tick 才生效,
+     *     中间 1+ tick 内 AI loop 仍会排 lambda → 主线程恢复后立刻吃一波 AI 重活,
+     *     mspt 反复二次拉高 (实测 14:51:06 mspt=125.8 → 88.8 delta + 15:42:49 stallMs=1079 触发 chain)。
+     *   把 stall dump 与 throttleEngaged=true 在同一次 dumpServerThreadStack 触发,
+     *     watchdog 立刻锁死 throttleEngaged,主线程 stall 恢复后第一个 tick 直接走 fastpath → mspt 余震被吃下。
+     *   解除仍走 shouldTholdown(mspt<60) 路径,Hysteresis 不会撞死循环。
+     *   安全:throttleEngaged 是 volatile + 同一字段(原 shouldThrottle 路径),不会引入新状态。
+     */
+    public void forceThrottleOnStall() {
+        throttleEngaged = true;
+        // 复位 30s 节流计时器,后面的 stall-mitigation warn 不会立刻被打(否则连发 3 条 flush log 撑爆控制台)。
+        // 由 VPM 主 tick 后续自己刷 lastMsptThrottleWarnAt,无需这里手动设。
+    }
+
+    /**
      * V5.54: 记录 startSpawnChunksPreheat 主动 forced 的 chunk 集合,供 stop() / kickAllImmediately()
      *   走 releaseForcedSpawnChunks() 调 setChunkForced(false) 释放,避免无 bot 在线时仍把这批 chunks
      *   常驻 ENTITY_TICKING 参与 vanilla 5 分钟 autosave 的 dirty chunk 集合,放大 mspt 卡顿。

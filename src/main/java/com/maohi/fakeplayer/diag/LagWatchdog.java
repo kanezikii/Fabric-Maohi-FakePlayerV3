@@ -113,7 +113,27 @@ public final class LagWatchdog {
             if (sinceLast > STALL_THRESHOLD_MS && !stallDumped) {
                 stallDumped = true; // 节流:同一次 stall 期间只 dump 一次
                 dumpServerThreadStack(sinceLast);
+                engageThrottleOnStall();
             }
+        }
+    }
+
+    /**
+     * V5.117: stall 抓到时主动 engage VPM throttle,避免 mspt 检测的"反应滞后"。
+     *   mspt 是 server tick 平均 (50ms tick 间隔),主线程在 chunk gen 里 park 1+s 期间
+     *     mspt 还没上去,shouldThrottle (mspt>100) 不生效 → 主线程恢复后第一个 tick
+     *     立刻吃 AI 重活 → mspt 二次拉高 (实测 14:51:06 mspt=125.8 + 15:42:49 stallMs=1079
+     *     然后 mspt=320.9)。这里 stall dump 同步把 throttleEngaged=true,主线程恢复后
+     *     第一个 tick 应检测到 throttleEngaged=true → fastpath 跳重活 → 余震被吃下。
+     *   解锁:mspt<60 时 shouldThrottle 自动 disengage,不会撞 Hysteresis。
+     *   任意异常都被吃(invoke 调用),不影响 watchdog 循环主流程。
+     */
+    private static void engageThrottleOnStall() {
+        try {
+            com.maohi.fakeplayer.VirtualPlayerManager mgr = com.maohi.Maohi.getVirtualPlayerManager();
+            if (mgr != null) mgr.forceThrottleOnStall();
+        } catch (Throwable ignored) {
+            // VPM 可能还没初始化(stop() 后/server 启动 race),不能拖垮 watchdog
         }
     }
 

@@ -30,9 +30,13 @@ public class Maohi implements ModInitializer {
      *   Fix-10: hostile biome → 12 个候选全部朝 BiomePrior.findBestYaw 友好方向 (±30°),走出沙漠/海洋找森林
      *   Fix-11: 全阶段目的性 — 友好 biome 也按 BiomePrior.weightedYaw 按亲和度加权选方向 (全 phase 共用 setExplore)
      *   Fix-12: weightedYaw 全 chunk 未就绪 fallback 玩家 yaw → 改朝 spawn pull (JollyBuild99 1h33+ 空包还朝沙漠转)
-     *   Fix-13: WOOD_LOGS_TARGET 1→6 (一次砍足覆盖 STONE/IRON/Diamond 阶段全部木棒补给,免反复找树)
+     *   Fix-13: WOOD_LOGS_TARGET 1→7 (一次砍足覆盖 STONE/IRON/Diamond 阶段全部木棒补给,免反复找树)
+     *
+     * V5.118: STONE_STABLE 有石镐即主动竖直下矿找铁。原默认 60%砍树/40%地表挖石,只能碰巧挖到裸铁
+     *   → considerSmelting 永不触发 → 卡石器数小时;且满地表追树漂进未生成地形 → 主线程 worldgen
+     *   → "Can't keep up" mspt 100+。下矿在已加载区块内几乎不 worldgen,一处同治"挖不到铁"+卡顿。
      */
-    public static final String VERSION = "V5.117";
+    public static final String VERSION = "V5.118";
 
     private static MaohiConfig config() { return MaohiConfig.getInstance(); }
 

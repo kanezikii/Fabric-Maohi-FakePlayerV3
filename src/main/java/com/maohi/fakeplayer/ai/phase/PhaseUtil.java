@@ -113,8 +113,10 @@ public final class PhaseUtil {
 
     // ==================== 共享常量（搬迁自 PhaseStoneAge） ====================
 
-    /** V5.117 Fix-13: WOOD_START → WOOD_CRAFT 的 log 当量阈值。提到 7 后稳一次任务拿足料。 */
-    public static final int WOOD_LOGS_TARGET = 7;
+    /** V5.118: WOOD_START → WOOD_CRAFT 的 log 当量阈值。7→12:配合燃料改煤(木料不再被烧),
+     *  一次囤够覆盖 WOOD/STONE/IRON 全周期的工作台+木棍+修工具需求(~30 木板)+余量,
+     *  石器/铁器期几乎不用回地表补木 → 不缺料、且少出地表漂(减 worldgen 卡顿)。 */
+    public static final int WOOD_LOGS_TARGET = 12;
 
     /** V5.42 dead-lock #1: bot 远离工作台时,在该半径内回找自己放过的 CRAFTING_TABLE。 */
     public static final int WORKBENCH_RETURN_RADIUS = 32;

@@ -230,6 +230,33 @@ public final class PhaseStoneAge implements Phase {
                     return;
                 }
 
+                // ── V5.118: 有石镐就主动下矿找铁(承"主动不靠碰巧" + 治 worldgen 卡顿根因) ──
+                //   原默认 60% 砍树/40% 地表挖石 → 石镐 bot 只能碰巧挖到裸铁 → 开头 considerSmelting(需背包已有
+                //   生铁)几乎永不触发 → 拿不到铁锭、卡石器数小时;且满地表追树漂进未生成地形 → 主线程 worldgen
+                //   → "Can't keep up" mspt 100+。改为:石镐够耐久(<60 已被上面补镐块接管) + 血量够 → 竖直下挖
+                //   到 Y15 找铁。got_iron(raw+ingot≥3)后 V5.109 自动爬回地表 → considerSmelting 接管熔炼,
+                //   1 锭即 derivePhaseFromInventory 升 IRON_AGE。竖井在已加载区块内、几乎不触发 worldgen;
+                //   无需带圆石(下挖即得圆石供爬升)。注:执行到此处 rawIron 必为 0(有生铁会被开头 considerSmelting
+                //   截走 return),故不会"带铁空转下矿";有 1 锭则早已不是 STONE_STABLE,亦不会死循环下挖。
+                if (cfg != null && cfg.enableStripMine
+                        && personality.stripMineCooldownUntil <= System.currentTimeMillis()
+                        && d.hasStonePickaxe
+                        && d.rawIronCount == 0
+                        && d.maxStonePickaxeRemainingDurability >= STRIP_MINE_MIN_PICK_DUR
+                        && player.getHealth() > 14.0f) {
+                    personality.stripMineForDiamond = false;
+                    personality.stripMineForCobble = false;   // 目标=铁,got_iron(raw+ingot≥3)收手
+                    personality.stripMineState = SubPhase.STRIP_MINE_DESCEND;
+                    personality.stripMineStartPos = player.getBlockPos().toImmutable();
+                    personality.stripMineStartY = player.getBlockY();
+                    personality.stripMineTunnelLen = 0;
+                    personality.currentTask = TaskType.STRIP_MINE;
+                    com.maohi.fakeplayer.TaskLogger.log(player, "stripmine_enter",
+                        "goal", "iron", "startY", personality.stripMineStartY,
+                        "pickDur", d.maxStonePickaxeRemainingDurability);
+                    return;
+                }
+
                 // ── V5.30 STONE_STABLE 默认: 60% 砍 / 40% 挖 ──
                 java.util.Random ssRng = new java.util.Random(player.getUuid().getLeastSignificantBits());
                 if (ssRng.nextDouble() < 0.6) {

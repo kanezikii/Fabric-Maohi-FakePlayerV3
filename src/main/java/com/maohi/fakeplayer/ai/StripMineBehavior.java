@@ -30,6 +30,10 @@ public class StripMineBehavior {
      *  (实测 DiamondDig79 Y15 囤 53 圆石却合不出石镐,STONE_TOOL 永远空闲)。 */
     private static final int COBBLE_STRIPMINE_TARGET = 16;
 
+    /** V5.118: 铁目标 strip-mine 收手前要带够的煤量(主动挖煤)。否则爬回地表熔铁只能烧木料 → 掏空木棍料。
+     *  附近无煤时由 max_len 兜底上爬,不空耗;煤在 Y15 矿区常见,顺路即够。 */
+    private static final int COAL_FUEL_TARGET = 5;
+
     public static boolean isActive(Personality pers) {
         return pers != null && pers.stripMineState != null;
     }
@@ -84,7 +88,7 @@ public class StripMineBehavior {
         //   根因:VPM.tickWorldInteraction 在 strip-mine 激活时提前 return(~line 2663),
         //   导致每 20 tick 的 simulateEntityInteraction 拾取完全不跑;而 tickLayer 用 breakBlock
         //   隔空挖最远 4 格(甚至下方)的矿石,raw_iron 掉在原地,只有正面穿矿时才被 vanilla ~1 格
-        //   碰撞拾起。偏轴/下方矿石掉落物从不回收 → hasIronInInventory 长期 false → tunnel 到
+        //   碰撞拾起。偏轴/下方矿石掉落物从不回收 → hasMinedEnoughRawIron 长期 false → tunnel 到
         //   max_len → abort → 30min 冷却 → STONE_AGE 永久卡死。
         //   复用 PICKUP_DROP 同款 12 格全量拾取兜底(同线程同上下文,strip-mine tick 本就由
         //   tickWorldInteraction 调度)。每 5 tick 一次,开销可忽略。
@@ -183,7 +187,12 @@ public class StripMineBehavior {
 
         // 检查是否已拿到目标矿物(V5.84: 钻石 goal 收手于 got_diamond,铁 goal 收手于 got_iron)
         boolean forDiamond = pers.stripMineForDiamond;
-        if (forDiamond ? hasDiamondInInventory(player) : hasIronInInventory(player)) {
+        boolean haveMineral = forDiamond ? hasDiamondInInventory(player) : hasMinedEnoughRawIron(player);
+        // V5.118 主动挖煤: 铁目标还要带够煤再收手 —— 否则爬回地表熔铁只能烧木料,木棍料被掏空合不出铁镐。
+        //   煤够 / 钻石目标(不等煤) 才收手;有铁缺煤则继续挖,下面 findOre("ore") 会顺路把附近 coal_ore 一并挖了。
+        //   附近无煤的极端情况由后面的 max_len(line 212)兜底上爬,不会无限空耗。
+        boolean haveFuel = forDiamond || countCoal(player) >= COAL_FUEL_TARGET;
+        if (haveMineral && haveFuel) {
             abort(pers, player, forDiamond ? "got_diamond" : "got_iron");
             return;
         }
@@ -364,6 +373,18 @@ public class StripMineBehavior {
     }
 
     /** V5.98: 数背包圆石 + 圆石深板岩(能合石器的)总量,供圆石目标 strip-mine 早退判定。 */
+    /** V5.118: 统计可作燃料的煤+木炭总数(主动挖煤的"够了"判定;有木炭也算,不必再为燃料挖煤)。 */
+    private static int countCoal(ServerPlayerEntity player) {
+        int n = 0;
+        for (int i = 0; i < player.getInventory().size(); i++) {
+            ItemStack stack = player.getInventory().getStack(i);
+            if (stack.getItem() == Items.COAL || stack.getItem() == Items.CHARCOAL) {
+                n += stack.getCount();
+            }
+        }
+        return n;
+    }
+
     private static int countCobble(ServerPlayerEntity player) {
         int n = 0;
         for (int i = 0; i < player.getInventory().size(); i++) {
@@ -484,32 +505,24 @@ public class StripMineBehavior {
      *   旧逻辑"有铁镐即 return true"的死锁: PhaseIronAge 派假人补铁时,
      *     一下井就因身上有铁镐立刻 abort,永远攒不到铁甲所需的铁锭。
      */
-    private static boolean hasIronInInventory(ServerPlayerEntity player) {
+    private static boolean hasMinedEnoughRawIron(ServerPlayerEntity player) {
         int rawIronCount = 0;
-        int ironIngotCount = 0;
         boolean hasIronPick = false;
         for (int i = 0; i < player.getInventory().size(); i++) {
             ItemStack stack = player.getInventory().getStack(i);
             if (stack.isEmpty()) continue;
             Item item = stack.getItem();
-            // NOTE: 粗铁与铁锭分开统计，用途完全不同(粗铁需冶炼，铁锭可直接合成)
-            if (item == Items.RAW_IRON) {
-                rawIronCount += stack.getCount();
-            } else if (item == Items.IRON_INGOT) {
-                ironIngotCount += stack.getCount();
-            }
+            if (item == Items.RAW_IRON) rawIronCount += stack.getCount();
             if (item == Items.IRON_PICKAXE || item == Items.DIAMOND_PICKAXE || item == Items.NETHERITE_PICKAXE) {
                 hasIronPick = true;
             }
         }
-        // NOTE: abort 阈值用 rawIron + ironIngot 之和判断，因为 bot 需要带粗铁回地表冶炼，
-        //   不能因为"全是粗铁"就不收手（否则永远出不了矿井）。
-        int totalIron = rawIronCount + ironIngotCount;
-        // 没铁镐: 凑够 3 铁合铁镐才收手
-        if (!hasIronPick) return totalIron >= 3;
-        // 有铁镐: 至少攒 4 铁(够合 1 件铁靴 — 最小铁甲部件)才值得回程;
-        //   全副武装后不会进铁目标 strip-mine,此分支只服务"有镐但缺甲"的补铁场景
-        return totalIron >= 4;
+        // V5.118: 门槛只数"生铁" —— 挖出来的就是生铁,铁锭是上爬后熔出来的结果,别混算。
+        //   旧版 raw+ingot 混算会被已有铁锭污染:IRON_AGE 攒甲时一进矿层就因旧锭达标秒退、白挖一趟。
+        //   纯生铁后每趟都实挖一批;已有铁锭是额外的(合成时自然一起用),不影响"这趟挖够没"。
+        //   无镐: 3 生铁 → 熔 3 锭 → 合铁镐(3锭+2棍);有镐: 4 生铁 → 熔 4 锭 → 合铁靴起步(攒甲)。
+        if (!hasIronPick) return rawIronCount >= 3;
+        return rawIronCount >= 4;
     }
 
     /**
