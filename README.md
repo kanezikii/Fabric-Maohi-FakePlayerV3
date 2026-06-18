@@ -13,6 +13,8 @@ Chunky-Fabric-1.4.55.jar
 /chunky radius 1000
 /chunky start
 
+- **核心配置文件:** [src/main/resources/maohi.properties](src/main/resources/maohi.properties)
+- 
 ---
 
 > **一句话总结**：
